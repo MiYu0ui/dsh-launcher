@@ -1,0 +1,23 @@
+# 构建产物（Release 资产另行上传，不入库）
+build/
+*.exe.old
+*.pdb
+
+# 构建时生成（版本号/时间戳每次都变，入库只会制造噪音）
+src/BuildInfo.Generated.cs
+
+# 运行期文件
+logs/
+*.log
+backup/
+
+# 本机专属：仓库坐标由 repo.txt 注入构建，但每台机器可以不同
+#（保留在库里也行，如果你想统一；不想统一就取消下一行注释）
+# repo.txt
+
+# Windows / 编辑器
+Thumbs.db
+desktop.ini
+.vs/
+*.user
+*.suo
