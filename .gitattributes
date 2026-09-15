@@ -1,0 +1,7 @@
+# Windows 项目：默认按 CRLF 检出；脚本与工作流保持 LF，避免跨平台执行问题
+* text=auto eol=crlf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.png binary
+*.ico binary
