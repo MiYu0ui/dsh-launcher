@@ -141,7 +141,7 @@ namespace DshLauncher
                 try { if (server != null && server.Owned) server.Stop(); } catch { }
             }
 
-            string report = string.Join(Environment.NewLine, lines.ToArray());
+            string report = SecretMask.Apply(string.Join(Environment.NewLine, lines.ToArray()));   // 报告可能被贴出来，先脱敏
             Console.WriteLine(report);
             if (!string.IsNullOrEmpty(a.SelfTestResult))
             {

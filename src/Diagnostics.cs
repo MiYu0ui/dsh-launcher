@@ -89,7 +89,8 @@ namespace DshLauncher
             try
             {
                 if (!File.Exists(path)) return "(文件不存在)";
-                return File.ReadAllText(path, Encoding.UTF8).TrimEnd();
+                // 脱敏兜底：磁盘上可能还留着修复之前写下的老日志
+                return SecretMask.Apply(File.ReadAllText(path, Encoding.UTF8).TrimEnd());
             }
             catch (Exception ex) { return "(读取失败：" + ex.Message + ")"; }
         }

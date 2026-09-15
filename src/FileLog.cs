@@ -35,6 +35,8 @@ namespace DshLauncher
         {
             try
             {
+                // 统一脱敏：日志是最常被分享出去的东西，绝不能带 ?token=
+                message = SecretMask.Apply(message);
                 lock (Gate)
                 {
                     File.AppendAllText(Path,
