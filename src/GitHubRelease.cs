@@ -98,7 +98,9 @@ namespace DshLauncher
                 if (namePos >= 0)
                 {
                     string name = Pick(json.Substring(namePos, u - namePos), "\"name\"\\s*:\\s*\"([^\"]+)\"");
-                    if (string.Equals(name, wantName, StringComparison.OrdinalIgnoreCase))
+                    // GitHub 上传资产时会把文件名里的空格换成点（"DSH Launcher.exe" → "DSH.Launcher.exe"），
+                    // 所以比较时把 空格/点/下划线 全部抹掉再比，避免因改名匹配不上。
+                    if (SameAsset(name, wantName))
                     {
                         string url = Pick(json.Substring(u), "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"");
                         int d = json.IndexOf("\"digest\"", u, StringComparison.Ordinal);
@@ -111,6 +113,23 @@ namespace DshLauncher
                 }
                 at = u + 24;
             }
+        }
+
+        private static string NormalizeName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+            {
+                if (c == ' ' || c == '.' || c == '_' || c == '-') continue;
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.ToString();
+        }
+
+        private static bool SameAsset(string a, string b)
+        {
+            return NormalizeName(a) == NormalizeName(b);
         }
 
         /// <summary>下载并校验，返回落地文件路径；任何一步失败都返回 "" 并说明原因。</summary>

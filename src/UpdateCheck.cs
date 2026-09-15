@@ -14,6 +14,7 @@ namespace DshLauncher
         public DateTime CandidateTime;
         public string DownloadUrl = "";     // 非空表示走 GitHub Releases 下载
         public string DownloadSha256 = "";
+        public string DownloadShaUrl = "";  // .sha256 资产的真实地址（比按名字猜更可靠）
     }
 
     /// <summary>
@@ -52,6 +53,7 @@ namespace DshLauncher
                         info.Available = true;
                         info.DownloadUrl = rel.AssetUrl;
                         info.DownloadSha256 = rel.Digest;
+                        info.DownloadShaUrl = rel.ShaUrl;
                         info.Message = "发现新版本 v" + rel.Version + "（GitHub Releases · " +
                                        GitHubRelease.ResolveSlug() + "）";
                     }
@@ -168,7 +170,7 @@ namespace DshLauncher
                 GitHubRelease.Release rel = new GitHubRelease.Release();
                 rel.AssetUrl = info.DownloadUrl;
                 rel.Digest = info.DownloadSha256;
-                rel.ShaUrl = DeriveShaUrl(info.DownloadUrl);
+                rel.ShaUrl = info.DownloadShaUrl.Length > 0 ? info.DownloadShaUrl : DeriveShaUrl(info.DownloadUrl);
                 string target = Path.Combine(Path.GetTempPath(),
                     "DSH Launcher-" + info.LatestVersion + ".exe");
                 string derr;
