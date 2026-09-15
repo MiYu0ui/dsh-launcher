@@ -53,7 +53,7 @@ namespace DshLauncher
                         info.DownloadUrl = rel.AssetUrl;
                         info.DownloadSha256 = rel.Digest;
                         info.Message = "发现新版本 v" + rel.Version + "（GitHub Releases · " +
-                                       BuildInfo.RepoSlug + "）";
+                                       GitHubRelease.ResolveSlug() + "）";
                     }
                     else
                     {

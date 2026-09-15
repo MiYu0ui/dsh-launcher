@@ -29,7 +29,32 @@ namespace DshLauncher
         private const string ExeAsset = "DSH Launcher.exe";
         private const string ShaAsset = "DSH Launcher.exe.sha256";
 
-        public static bool Enabled { get { return !string.IsNullOrEmpty(BuildInfo.RepoSlug); } }
+        public static bool Enabled { get { return ResolveSlug().Length > 0; } }
+
+        private static string _cachedSlug;
+
+        /// <summary>
+        /// 仓库坐标：优先取构建时注入的（CI 里由 github.repository 自动写好）；
+        /// 为空时读 exe 同目录的 repo.txt —— 这样手动下载的 Release 包也能指向仓库，
+        /// 不用为了改个坐标重新编译。
+        /// </summary>
+        public static string ResolveSlug()
+        {
+            if (!string.IsNullOrEmpty(BuildInfo.RepoSlug)) return BuildInfo.RepoSlug;
+            if (_cachedSlug != null) return _cachedSlug;
+            _cachedSlug = "";
+            try
+            {
+                string beside = Path.Combine(AppPaths.InstallDir, "repo.txt");
+                if (File.Exists(beside))
+                {
+                    string s = File.ReadAllText(beside).Trim();
+                    if (s.Length > 0 && s.IndexOf('/') > 0) _cachedSlug = s;
+                }
+            }
+            catch { }
+            return _cachedSlug;
+        }
 
         /// <summary>查询最新 release；失败返回 null 并通过 error 说明原因。</summary>
         public static Release FetchLatest(out string error)
@@ -38,7 +63,8 @@ namespace DshLauncher
             if (!Enabled) { error = "未配置仓库"; return null; }
 
             string json;
-            try { json = HttpGet(ApiBase + BuildInfo.RepoSlug + "/releases/latest", 8000); }
+            string slug = ResolveSlug();
+            try { json = HttpGet(ApiBase + slug + "/releases/latest", 8000); }
             catch (WebException wex)
             {
                 HttpWebResponse r = wex.Response as HttpWebResponse;
