@@ -15,11 +15,15 @@ namespace DshLauncher
         public bool Settings;       // 启动后直接打开设置窗口
         public bool NoBoot;         // 跳过开启动画
         public bool AfterUpdate;    // 更新后重启：先等旧实例释放单实例锁
+        public bool AfterInstall;   // 迁移安装位置后重启：同样要等旧实例交出单实例锁
         public bool Help;
         public int Port;            // 覆盖端口（0 = 用配置）
         public string Dir = "";     // 覆盖工作目录
         public string Mode = "";    // 自检时的启动方式 direct/npx
         public string SelfTestResult = "";
+
+        /// <summary>启动时要不要先等旧实例让出单实例锁（更新 / 迁移安装位置之后）。</summary>
+        public bool WaitForPreviousInstance { get { return AfterUpdate || AfterInstall; } }
 
         public static Args Parse(string[] argv)
         {
@@ -47,6 +51,7 @@ namespace DshLauncher
                 else if (lower == "--settings") a.Settings = true;
                 else if (lower == "--no-boot") a.NoBoot = true;
                 else if (lower == "--after-update") a.AfterUpdate = true;
+                else if (lower == "--after-install") a.AfterInstall = true;
             }
             return a;
         }
@@ -63,6 +68,8 @@ namespace DshLauncher
                 "  DSH Launcher.exe --no-boot       跳过开启动画\r\n" +
                 "  DSH Launcher.exe --port 3080     临时指定端口\r\n" +
                 "  DSH Launcher.exe --dir D:\\项目   临时指定工作目录\r\n" +
+                "  DSH Launcher.exe --after-update  更新后重启（先等旧实例交出单实例锁）\r\n" +
+                "  DSH Launcher.exe --after-install 迁移安装位置后重启（同上）\r\n" +
                 "  DSH Launcher.exe --selftest 报告.txt [--mode direct|npx] [--verify] [--port 3099]\r\n" +
                 "                                   自检：验证启动过程不出现任何黑色命令行窗口\r\n";
         }

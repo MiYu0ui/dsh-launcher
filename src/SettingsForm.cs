@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -10,7 +11,7 @@ namespace DshLauncher
     internal class SettingsForm : Form
     {
         private const int DesignW = 664;
-        private const int DesignH = 712;
+        private const int DesignH = 810;   // 782 + 28：又多了「始终用官方最新版」一行
         private const int PadX = 34;
         private const int HeaderH = 76;
 
@@ -22,6 +23,7 @@ namespace DshLauncher
         private RadioButton _modeNpx;
         private RadioButton _modeDirect;
         private CheckBox _verify;
+        private CheckBox _versionMode;
         private TextBox _version;
         private ComboBox _registry;
         private CheckBox _autoOpen;
@@ -31,6 +33,14 @@ namespace DshLauncher
         private CheckBox _boot;
         private CheckBox _transition;
         private Label _shortcutHint;
+        private Label _installDirLabel;
+
+        /// <summary>
+        /// 「更改安装位置」的待生效值：
+        ///   null = 没改；"" = 绿色免安装；其它 = 新安装目录。
+        /// 真正的搬迁在设置窗保存并关闭之后由 LauncherContext 执行 —— 那里才方便重启启动器。
+        /// </summary>
+        public string PendingInstallDir = null;
 
         public SettingsForm(AppConfig cfg, DshServer server)
         {
@@ -102,6 +112,8 @@ namespace DshLauncher
 
             y += 40;
             _verify = AddCheck("启动前核验下载源完整性（防止被投毒，需要联网）", PadX + 6, y);
+            y += 28;
+            _versionMode = AddCheck("部署时自动使用官方最新可安装版（取消勾选则固定用下面的版本号）", PadX + 6, y);
             y += 36;
             AddLabel("固定版本", PadX + 26, y + 7);
             _version = new TextBox();
@@ -137,9 +149,31 @@ namespace DshLauncher
             y += 28;
             _transition = AddCheck("服务启动成功后播放接入过渡动画，再打开 Web 界面", PadX + 6, y);
 
-            y += 46;
+            y += 40;
+            AddLabel("安装位置（程序本体放在哪里；空 = 绿色免安装）", PadX, y);
+            y += 22;
+            _installDirLabel = new Label();
+            _installDirLabel.Font = Theme.FontMonoSmall;
+            _installDirLabel.ForeColor = Theme.Ink;
+            _installDirLabel.BackColor = Theme.PanelHi;
+            _installDirLabel.AutoSize = false;
+            _installDirLabel.TextAlign = ContentAlignment.MiddleLeft;
+            _installDirLabel.BorderStyle = BorderStyle.FixedSingle;
+            _installDirLabel.Location = new Point(Theme.S(PadX), Theme.S(y));
+            _installDirLabel.Size = new Size(Theme.S(438), Theme.S(28));
+            Controls.Add(_installDirLabel);
+
+            FlatButton changeDir = new FlatButton();
+            changeDir.Text = "更改…";
+            changeDir.Location = new Point(Theme.S(PadX + 450), Theme.S(y - 5));
+            changeDir.Size = new Size(Theme.S(140), Theme.S(38));
+            changeDir.BackColor = Theme.Bg;
+            changeDir.Click += delegate(object s, EventArgs e) { ChangeInstallDir(); };
+            Controls.Add(changeDir);
+
+            y += 54;
             _shortcutHint = new Label();
-            _shortcutHint.Text = "创建 / 修复桌面与开始菜单快捷方式 →";
+            _shortcutHint.Text = "创建 / 修复快捷方式（桌面 + 开始菜单 + 开机自启）→";
             _shortcutHint.Font = Theme.FontSmall;
             _shortcutHint.ForeColor = Theme.Amber;
             _shortcutHint.BackColor = Theme.Bg;
@@ -147,9 +181,27 @@ namespace DshLauncher
             _shortcutHint.TextAlign = ContentAlignment.MiddleLeft;
             _shortcutHint.Cursor = Cursors.Hand;
             _shortcutHint.Location = new Point(Theme.S(PadX + 6), Theme.S(y));
-            _shortcutHint.Size = new Size(Theme.S(330), Theme.S(24));
+            _shortcutHint.Size = new Size(Theme.S(430), Theme.S(24));
             _shortcutHint.Click += delegate(object s, EventArgs e) { RepairShortcuts(); };
             Controls.Add(_shortcutHint);
+
+            // 卸载入口（用 Abort 这个 DialogResult 表示"不是保存，而是要去卸载"）
+            Label uninstall = new Label();
+            uninstall.Text = "卸载 DSH / 启动器…";
+            uninstall.Font = Theme.FontSmall;
+            uninstall.ForeColor = Theme.SignalAlert;
+            uninstall.BackColor = Theme.Bg;
+            uninstall.AutoSize = false;
+            uninstall.TextAlign = ContentAlignment.MiddleRight;
+            uninstall.Cursor = Cursors.Hand;
+            uninstall.Location = new Point(Theme.S(PadX + 474), Theme.S(y));
+            uninstall.Size = new Size(Theme.S(160), Theme.S(24));
+            uninstall.Click += delegate(object s, EventArgs e)
+            {
+                DialogResult = DialogResult.Abort;
+                Close();
+            };
+            Controls.Add(uninstall);
 
             int btnY = DesignH - 66;
             FlatButton save = new FlatButton();
@@ -282,6 +334,7 @@ namespace DshLauncher
             _modeNpx.Checked = _cfg.LaunchMode != "direct";
             _modeDirect.Checked = _cfg.LaunchMode == "direct";
             _verify.Checked = _cfg.VerifyIntegrity;
+            _versionMode.Checked = _cfg.VersionMode != "pinned";
             _version.Text = _cfg.PinnedVersion;
             int idx = _registry.Items.IndexOf(_cfg.Registry);
             _registry.SelectedIndex = idx >= 0 ? idx : 0;
@@ -291,6 +344,9 @@ namespace DshLauncher
             _autostart.Checked = _cfg.AutoStart;
             _boot.Checked = _cfg.BootAnimation;
             _transition.Checked = _cfg.TransitionAnimation;
+            _installDirLabel.Text = _cfg.IsPortable
+                ? "（绿色免安装）" + AppPaths.InstallDir
+                : _cfg.InstallDir;
         }
 
         private void ResetDefaults()
@@ -300,6 +356,7 @@ namespace DshLauncher
             _modeNpx.Checked = true;
             _modeDirect.Checked = false;
             _verify.Checked = def.VerifyIntegrity;
+            _versionMode.Checked = true;
             _version.Text = def.PinnedVersion;
             _registry.SelectedIndex = 0;
             _autoOpen.Checked = def.AutoOpenBrowser;
@@ -343,6 +400,7 @@ namespace DshLauncher
             _cfg.Port = (int)_port.Value;
             _cfg.LaunchMode = _modeDirect.Checked ? "direct" : "npx";
             _cfg.VerifyIntegrity = _verify.Checked;
+            _cfg.VersionMode = _versionMode.Checked ? "latest" : "pinned";
             _cfg.PinnedVersion = _version.Text.Trim();
             _cfg.Registry = _registry.SelectedItem == null ? _cfg.Registry : _registry.SelectedItem.ToString();
             _cfg.AutoOpenBrowser = _autoOpen.Checked;
@@ -365,41 +423,99 @@ namespace DshLauncher
             {
                 if (enable)
                 {
-                    string legacy = Shortcuts.DisableLegacyAutoStart();
-                    bool ok = Shortcuts.Create(Shortcuts.AutoStartLinkPath, AppPaths.ExePath, "--autostart",
-                                               AppPaths.InstallDir, AppPaths.ExePath, 7);
+                    string legacy = Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
+                    bool ok = Shortcuts.CreateAutoStartLink(AppPaths.ExePath, AppPaths.InstallDir);
                     if (!ok)
                         ConfirmDialog.Info(this, "CONFIG / 自启失败", "写入开机自启快捷方式失败",
                             "无法在启动文件夹里创建快捷方式。",
                             new string[] { "目标=" + Shortcuts.AutoStartLinkPath },
                             "请检查启动目录的写入权限。");
-                    else if (legacy != null)
-                        ConfirmDialog.Info(this, "CONFIG / 已切换自启方式", "已停用旧的 PowerShell 自启项",
+                    else if (!string.IsNullOrEmpty(legacy))
+                        ConfirmDialog.Info(this, "CONFIG / 自启项已处理", "旧自启项已处理",
                             "开机将由本启动器静默启动服务，不再出现黑窗口。",
-                            new string[] { "旧自启项备份=" + Path.GetFileName(legacy) }, null);
+                            new string[] { "说明=" + legacy }, null);
                 }
                 else
                 {
+                    // 以配置为准：关掉就把启动文件夹里那条清掉，不留孤儿
                     Shortcuts.Delete(Shortcuts.AutoStartLinkPath);
+                    Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
                 }
             }
             catch { }
         }
 
+        /// <summary>
+        /// 一次修好全部三处：桌面 + 开始菜单 + 开机自启（自启按当前勾选状态建或删）。
+        /// 老版本只修前两处，启动文件夹里那条就一直烂着 —— 这次补上。
+        /// </summary>
         private void RepairShortcuts()
         {
-            string desktop = Path.Combine(Shortcuts.DesktopDir, "DSH 启动器.lnk");
-            string startMenu = Path.Combine(Shortcuts.ProgramsDir, "DSH 启动器.lnk");
-            bool a = Shortcuts.Create(desktop, AppPaths.ExePath, "", AppPaths.InstallDir, AppPaths.ExePath, 1);
-            bool b = Shortcuts.Create(startMenu, AppPaths.ExePath, "", AppPaths.InstallDir, AppPaths.ExePath, 1);
+            bool wantAuto = _autostart.Checked;
+            bool[] app = Shortcuts.CreateAppLinks(AppPaths.ExePath, AppPaths.InstallDir);
+
+            bool autoOk = true;
+            string autoNote;
+            if (wantAuto)
+            {
+                autoOk = Shortcuts.CreateAutoStartLink(AppPaths.ExePath, AppPaths.InstallDir);
+                autoNote = autoOk ? "OK" : "失败";
+            }
+            else
+            {
+                Shortcuts.Delete(Shortcuts.AutoStartLinkPath);
+                autoNote = "（按当前设置保持关闭，已清理）";
+            }
+
+            string legacy = Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
+
+            bool allOk = app[0] && app[1] && autoOk;
+            List<string> fields = new List<string>();
+            fields.Add("桌面=" + Shortcuts.DesktopLinkPath + (app[0] ? "  OK" : "  失败"));
+            fields.Add("开始菜单=" + Shortcuts.StartMenuLinkPath + (app[1] ? "  OK" : "  失败"));
+            fields.Add("开机自启=" + autoNote);
+            if (!string.IsNullOrEmpty(legacy)) fields.Add("旧自启项=" + legacy);
+
             ConfirmDialog.Info(this, "SHORTCUT / 快捷方式", "快捷方式已处理",
-                (a && b) ? "桌面与开始菜单快捷方式均已就绪。" : "部分快捷方式创建失败，详见下方路径。",
+                allOk ? "桌面、开始菜单与开机自启（如已勾选）均已就绪。" : "部分快捷方式创建失败，详见下方。",
+                fields.ToArray(),
+                allOk ? null : "请检查目标目录的写入权限。");
+        }
+
+        /// <summary>
+        /// 「更改…」：重新选安装位置。这里只记录待生效值，真正的搬迁在设置窗保存之后
+        /// 由 LauncherContext 执行 —— 那一步可能会重启启动器，不能还压着一个模态窗。
+        /// </summary>
+        private void ChangeInstallDir()
+        {
+            ConfirmDialog.Choice c = InstallLocation.Ask(this);
+            if (c == ConfirmDialog.Choice.Cancel) return;      // 取消 = 不改
+
+            if (c == ConfirmDialog.Choice.Alt)                 // 绿色免安装
+            {
+                PendingInstallDir = "";
+                _installDirLabel.Text = "（绿色免安装）" + AppPaths.InstallDir;
+                ConfirmDialog.Info(this, "INSTALL / 安装位置", "已选择绿色免安装",
+                    "保存后生效：启动器不再指向任何安装目录，就在当前所在目录运行。",
+                    new string[] { "当前位置=" + AppPaths.InstallDir }, null);
+                return;
+            }
+
+            string target = c == ConfirmDialog.Choice.Confirm
+                ? AppConfig.SuggestedInstallDir()
+                : InstallLocation.PickFolder(this, _cfg.InstallDir.Length > 0 ? _cfg.InstallDir : AppPaths.InstallDir);
+            if (string.IsNullOrEmpty(target)) return;
+
+            PendingInstallDir = target;
+            _installDirLabel.Text = target;
+            ConfirmDialog.Info(this, "INSTALL / 安装位置", "保存后生效",
+                "点「保存」后启动器会把程序本体安置到该位置、重建快捷方式，然后以新位置重启自己。",
                 new string[]
                 {
-                    "桌面=" + desktop,
-                    "开始菜单=" + startMenu
+                    "新安装位置=" + target,
+                    "当前程序=" + AppPaths.ExePath
                 },
-                (a && b) ? null : "请检查目标目录的写入权限。");
+                "正在运行的 DSH 服务不受影响。");
         }
 
         protected override void OnPaint(PaintEventArgs e)

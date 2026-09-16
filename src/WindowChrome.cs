@@ -31,10 +31,10 @@ namespace DshLauncher
         }
     }
 
-    /// <summary>无边框窗口右上角的自绘按钮（最小化 / 关闭），细线字形。</summary>
+    /// <summary>无边框窗口右上角的自绘按钮（最小化 / 关闭 / 齿轮设置），细线字形。</summary>
     internal class ChromeButton : Control
     {
-        public enum GlyphKind { Minimize, Close }
+        public enum GlyphKind { Minimize, Close, Gear }
 
         private readonly GlyphKind _kind;
         private bool _hover;
@@ -72,6 +72,7 @@ namespace DshLauncher
             Theme.Fill(g, ClientRectangle, BackColor);
 
             bool close = _kind == GlyphKind.Close;
+            bool isGear = _kind == GlyphKind.Gear;
             Color glyph = Theme.InkSoft;
             if (_hover)
             {
@@ -83,6 +84,11 @@ namespace DshLauncher
             int cx = Width / 2;
             int cy = Height / 2;
             int half = Math.Max(4, Theme.S(5));
+            if (isGear)
+            {
+                DrawGear(g, cx, cy, glyph);
+                return;
+            }
             using (Pen p = new Pen(glyph, Math.Max(1f, Theme.SF(1.2f))))
             {
                 if (_kind == GlyphKind.Minimize)
@@ -95,6 +101,40 @@ namespace DshLauncher
                     g.DrawLine(p, cx + half, cy - half, cx - half, cy + half);
                 }
             }
+        }
+
+        /// <summary>
+        /// 经典齿轮：齿根圆 + 8 根圆头齿 + 中心孔，纯 stroke 绘制，与这套界面的细线语言一致。
+        /// 打开抗锯齿（其余字形是直线，关着也无所谓；齿轮是曲线，必须开）。
+        /// </summary>
+        private void DrawGear(Graphics g, int cx, int cy, Color c)
+        {
+            SmoothingMode saved = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            try
+            {
+                float R = Theme.SF(6.2f);        // 齿根圆半径
+                float tooth = Theme.SF(3.0f);    // 齿长
+                float hole = Theme.SF(2.0f);     // 中心孔半径
+                const int teeth = 8;
+                using (Pen p = new Pen(c, Math.Max(1f, Theme.SF(1.15f))))
+                {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
+                    g.DrawEllipse(p, cx - R, cy - R, R * 2f, R * 2f);
+                    for (int i = 0; i < teeth; i++)
+                    {
+                        double a = i * 2.0 * Math.PI / teeth;
+                        float x1 = cx + (float)Math.Cos(a) * R;
+                        float y1 = cy + (float)Math.Sin(a) * R;
+                        float x2 = cx + (float)Math.Cos(a) * (R + tooth);
+                        float y2 = cy + (float)Math.Sin(a) * (R + tooth);
+                        g.DrawLine(p, x1, y1, x2, y2);
+                    }
+                    g.DrawEllipse(p, cx - hole, cy - hole, hole * 2f, hole * 2f);
+                }
+            }
+            finally { g.SmoothingMode = saved; }
         }
     }
 }

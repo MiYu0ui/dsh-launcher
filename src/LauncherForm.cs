@@ -31,12 +31,15 @@ namespace DshLauncher
         private FlatButton _btnOpen;
         private FlatButton _btnStop;
         private FlatButton _btnUpdate;
-        private FlatButton _btnSettings;
+        private FlatButton _btnUninstall;
         private FlatButton _btnLogFolder;
         private FlatButton _btnExport;
         private FlatButton _btnCleanup;
         private ChromeButton _btnClose;
         private ChromeButton _btnMin;
+        private ChromeButton _btnGear;
+        private bool _gearHover;
+        private Rectangle _gearLabelRect;
         private string _lastLog = "";
         private bool _allowClose;
 
@@ -98,34 +101,37 @@ namespace DshLauncher
             _ring.Size = new Size(Theme.S(DesignW - PadX * 2 - PanelW - 16), Theme.S(PanelH));
             Controls.Add(_ring);
 
-            _btnStart = MakeButton("启动 DSH", "01", PadX, 182, BtnTop, BtnH, true);
+            // 主按钮行：5 个按钮铺满 30..750，间距 14；主操作（启动 DSH）给更宽的 168，
+            // 其余等宽 124 —— 原来带 01/02 编号时左侧被占 42px，"卸载…" 会被省略号吃掉。
+            _btnStart = MakeButton("启动 DSH", PadX, 168, BtnTop, BtnH, true);
             _btnStart.Click += delegate(object s, EventArgs e)
             {
                 if (_deployMode) _ctx.StartDeployment();
                 else _ctx.StartServer();
             };
 
-            _btnOpen = MakeButton("打开界面", "02", PadX + 190, 152, BtnTop, BtnH, false);
+            _btnOpen = MakeButton("打开界面", 212, 124, BtnTop, BtnH, false);
             _btnOpen.Click += delegate(object s, EventArgs e) { _ctx.OpenUi(); };
 
-            _btnStop = MakeButton("停止", "03", PadX + 350, 112, BtnTop, BtnH, false);
+            _btnStop = MakeButton("停止", 350, 124, BtnTop, BtnH, false);
             _btnStop.Danger = true;
             _btnStop.Click += delegate(object s, EventArgs e) { _ctx.StopServer(true); };
 
-            _btnSettings = MakeButton("设置", "05", DesignW - PadX - 110, 110, BtnTop, BtnH, false);
-            _btnSettings.Click += delegate(object s, EventArgs e) { _ctx.OpenSettings(this); };
-
-            _btnUpdate = MakeButton("检查更新", "04", PadX + 470, 130, BtnTop, BtnH, false);
+            _btnUpdate = MakeButton("检查更新", 488, 124, BtnTop, BtnH, false);
             _btnUpdate.Click += delegate(object s, EventArgs e) { _ctx.UpdateButtonClicked(); };
 
+            // 设置已搬到右上角齿轮，这里只留卸载
+            _btnUninstall = MakeButton("卸载…", 626, 124, BtnTop, BtnH, false);
+            _btnUninstall.Click += delegate(object s, EventArgs e) { _ctx.OpenUninstall(this); };
+
             // 页脚工具按钮：日志 + 残留清扫
-            _btnCleanup = MakeButton("清扫残留", "", PadX + 262, 132, FootRule + 8, 28, false);
+            _btnCleanup = MakeButton("清扫残留", PadX + 262, 132, FootRule + 8, 28, false);
             _btnCleanup.Click += delegate(object s, EventArgs e) { _ctx.CleanupResiduals(); };
 
-            _btnLogFolder = MakeButton("打开日志文件夹", "", PadX + 420, 148, FootRule + 8, 28, false);
+            _btnLogFolder = MakeButton("打开日志文件夹", PadX + 420, 148, FootRule + 8, 28, false);
             _btnLogFolder.Click += delegate(object s, EventArgs e) { _ctx.OpenLogFolder(); };
 
-            _btnExport = MakeButton("导出诊断日志", "", PadX + 576, 144, FootRule + 8, 28, false);
+            _btnExport = MakeButton("导出诊断日志", PadX + 576, 144, FootRule + 8, 28, false);
             _btnExport.Click += delegate(object s, EventArgs e) { _ctx.ExportDiagnostics(); };
 
             _status.SetState("STATUS / 运行状态", "未运行", "", Theme.SignalIdle, _ctx.Config.Workspace, "");
@@ -145,7 +151,58 @@ namespace DshLauncher
             _btnMin.Invoked += delegate(object s, EventArgs e) { WindowState = FormWindowState.Minimized; };
             Controls.Add(_btnMin);
 
+            // 齿轮 + 「设置」二字：放在右上角品牌锁排的左边。
+            // 几何由 BrandCluster 统一算，和 OnPaint 里画标签/署名/标志用的是同一套测量，不会对不齐。
+            _btnGear = new ChromeButton(ChromeButton.GlyphKind.Gear);
+            using (Graphics gg = CreateGraphics())
+            {
+                BrandBox bx = BrandCluster(gg);
+                _btnGear.Location = new Point(bx.GearLeft, bx.MarkY + (bx.MarkH - bx.GearH) / 2);
+                _btnGear.Size = new Size(bx.GearW, bx.GearH);
+                _gearLabelRect = new Rectangle(bx.LabelLeft, bx.MarkY, bx.LabelW, bx.MarkH);
+            }
+            _btnGear.BackColor = Theme.Panel;
+            _btnGear.Invoked += delegate(object s, EventArgs e) { _ctx.OpenSettings(this); };
+            // 悬停时把「设置」二字一起点亮 —— 标签与图标是一个整体
+            _btnGear.MouseEnter += delegate(object s, EventArgs e) { _gearHover = true; Invalidate(); };
+            _btnGear.MouseLeave += delegate(object s, EventArgs e) { _gearHover = false; Invalidate(); };
+            Controls.Add(_btnGear);
+
             ResumeLayout(false);
+        }
+
+        /// <summary>右上角「设置齿轮 | 设置 | RHINE · LAB | 莱茵标志」这一串的几何。</summary>
+        private class BrandBox
+        {
+            public int MarkX, MarkY, MarkW, MarkH;
+            public int TextLeft;
+            public int LabelLeft, LabelW;
+            public int GearLeft, GearW, GearH;
+        }
+
+        /// <summary>
+        /// 右侧品牌锁排的横向布局。**绘制与控件定位共用它** ——
+        /// 两处各算一套的话，字体或缩放一变就会错位。
+        /// </summary>
+        private BrandBox BrandCluster(Graphics g)
+        {
+            BrandBox b = new BrandBox();
+            b.MarkH = Theme.S(20);
+            b.MarkW = (int)Math.Round(b.MarkH * 2.2);
+            b.MarkX = Theme.S(DesignW) - Theme.S(PadX) - b.MarkW;
+            b.MarkY = Theme.S(36);
+
+            Size tw = Theme.MeasureTracked(g, "RHINE · LAB", Theme.FontMonoSmall, Theme.SF(1.8f));
+            b.TextLeft = b.MarkX - Theme.S(10) - tw.Width;
+
+            // 「设置」二字贴在齿轮右侧；再留 26px 与品牌署名分开，免得两组字挤成一片
+            b.LabelW = Theme.MeasureTracked(g, "设置", Theme.FontSmall, Theme.SF(1.2f)).Width;
+            b.LabelLeft = b.TextLeft - Theme.S(26) - b.LabelW;
+
+            b.GearW = Theme.S(28);
+            b.GearH = Theme.S(24);
+            b.GearLeft = b.LabelLeft - Theme.S(8) - b.GearW;
+            return b;
         }
 
         /// <summary>无边框窗口补一个系统投影，免得贴在桌面上"发飘"。</summary>
@@ -162,15 +219,21 @@ namespace DshLauncher
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            // 「设置」二字也能点：与齿轮同一个出口
+            if (!_gearLabelRect.IsEmpty && _gearLabelRect.Contains(e.Location))
+            {
+                _ctx.OpenSettings(this);
+                return;
+            }
             // 标题栏区域按住即可拖动窗口
-            if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
+            if (e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
-        private FlatButton MakeButton(string text, string index, int x, int w, int y, int h, bool primary)
+        private FlatButton MakeButton(string text, int x, int w, int y, int h, bool primary)
         {
             FlatButton b = new FlatButton();
             b.Text = text;
-            b.Index = index;
             b.Primary = primary;
             b.Location = new Point(Theme.S(x), Theme.S(y));
             b.Size = new Size(Theme.S(w), Theme.S(h));
@@ -345,8 +408,9 @@ namespace DshLauncher
             _btnStart.Enabled = !busy && !running;
             _btnOpen.Enabled = running;
             _btnStop.Enabled = !busy && (st == ServerStatus.Running || st == ServerStatus.External);
-            _btnSettings.Enabled = !busy;
             _btnUpdate.Enabled = !busy;
+            _btnUninstall.Enabled = !busy;
+            if (_btnGear != null) _btnGear.Enabled = !busy;
         }
 
         public void AllowClose() { _allowClose = true; }
@@ -419,19 +483,19 @@ namespace DshLauncher
             Theme.DrawTracked(g, "DSH LAUNCHER", Theme.FontWord, textX, band + Theme.S(25), Theme.Ink, Theme.SF(2.6f));
             Theme.DrawTracked(g, "深度求索 · 档案接入终端", Theme.FontSmall, textX + Theme.S(1), band + Theme.S(57), Theme.Sub, Theme.SF(1.2f));
 
-            // 右侧：莱茵生命标志 + 署名（让开右上角的窗口按钮）
+            // 右侧：「设置」齿轮 + 二字提示 | RHINE · LAB | 莱茵生命标志
             Image mark = Res.Mark();
-            int markH = Theme.S(20);
-            int markW = (int)Math.Round(markH * 2.2);
-            int markX = right - markW;
-            int markY = Theme.S(36);
+            BrandBox bb = BrandCluster(g);
             if (mark != null)
             {
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.DrawImage(mark, new Rectangle(markX, markY, markW, markH));
+                g.DrawImage(mark, new Rectangle(bb.MarkX, bb.MarkY, bb.MarkW, bb.MarkH));
             }
             Theme.DrawTrackedRight(g, "RHINE · LAB", Theme.FontMonoSmall,
-                markX - Theme.S(10), markY + Theme.S(3), Theme.Ink, Theme.SF(1.8f));
+                bb.MarkX - Theme.S(10), bb.MarkY + Theme.S(3), Theme.Ink, Theme.SF(1.8f));
+            // 齿轮旁边的「设置」二字：让人一眼知道那里是设置（悬停时与图标一起转暖褐）
+            Theme.DrawTracked(g, "设置", Theme.FontSmall,
+                bb.LabelLeft, bb.MarkY + Theme.S(3), _gearHover ? Theme.Amber : Theme.Sub, Theme.SF(1.2f));
 
             UpdateInfo up = _ctx.Update;
             bool hasUpdate = up != null && up.Available;

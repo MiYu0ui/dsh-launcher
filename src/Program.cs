@@ -42,7 +42,7 @@ namespace DshLauncher
             Application.SetCompatibleTextRenderingDefault(false);
 
             bool created = false;
-            int attempts = args.AfterUpdate ? 60 : 1;   // 更新重启：等旧实例交出单实例锁
+            int attempts = args.WaitForPreviousInstance ? 60 : 1;   // 更新 / 迁移安装位置后重启：等旧实例交出单实例锁
             for (int i = 0; i < attempts; i++)
             {
                 _instanceMutex = new Mutex(true, Args.MutexName, out created);

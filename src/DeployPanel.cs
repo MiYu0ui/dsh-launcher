@@ -77,8 +77,11 @@ namespace DshLauncher
             Theme.SweepRule(g, x, right, Theme.S(62), Theme.Line, _signal, 8.5, 0.1);
 
             int y = Theme.S(68);
-            int rowH = Theme.S(16);
-            for (int i = 0; i < _steps.Count && i < 6; i++)
+            // 步骤数会随版本变化（当前 7 步）；按可用高度自适应行高，保证全部显示得下
+            int shown = Math.Min(_steps.Count, 8);
+            int areaBottom = Height - Theme.S(26);
+            int rowH = shown > 0 ? Math.Max(Theme.S(11), (areaBottom - Theme.S(68)) / shown) : Theme.S(16);
+            for (int i = 0; i < shown; i++)
             {
                 DeployStep s = _steps[i];
                 Color titleColor = Theme.Ink;

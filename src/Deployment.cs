@@ -40,6 +40,13 @@ namespace DshLauncher
         public string Headline = "";
         public string Summary = "";
         public readonly List<string> Missing = new List<string>();
+
+        // ---- 部署第 1 步的系统兼容性判定（对齐旧脚本 Test-WindowsCompatibility）----
+        public bool SysSupported = true;
+        public string SysProblem = "";
+        public string SysWarning = "";
+        // ---- 本地缓存里那份 DSH 的版本（固定版本模式下用来发现版本错配）----
+        public string CachedVersion = "";
     }
 
     /// <summary>
@@ -79,11 +86,25 @@ namespace DshLauncher
             }
             catch { }
 
+            try { SysCheck.Supported(out r.SysProblem, out r.SysWarning); r.SysSupported = string.IsNullOrEmpty(r.SysProblem); }
+            catch { }
+
             if (!r.NodePresent) r.Missing.Add("未安装 Node.js");
             else if (!r.NodeReady) r.Missing.Add("Node.js 版本过低（需要 22.19+ 或 24+，当前 " + r.NodeVersion + "）");
             if (r.NodeReady && !r.NpmReady) r.Missing.Add("缺少 npm");
             if (r.NodeReady && !r.NpxReady) r.Missing.Add("缺少 npx");
             if (!r.DshCached) r.Missing.Add("本地没有 DSH（@deepseek-ai/dsh）");
+            if (r.DshCached)
+            {
+                // 固定版本模式下，缓存里那份必须就是目标版本；否则会误判成「无需部署」而跳过一键部署
+                try { r.CachedVersion = VersionResolve.LocalCachedVersion(cfg) ?? ""; }
+                catch { }
+                if (string.Equals(cfg.VersionMode, "pinned", StringComparison.OrdinalIgnoreCase) &&
+                    r.CachedVersion.Length > 0 &&
+                    !string.Equals(r.CachedVersion, cfg.PinnedVersion, StringComparison.OrdinalIgnoreCase))
+                    r.Missing.Add("本地 DSH 版本 " + r.CachedVersion + " 与固定版本 " + cfg.PinnedVersion + " 不一致");
+            }
+            if (!r.SysSupported) r.Missing.Add(r.SysProblem);
 
             r.NeedsDeploy = r.Missing.Count > 0;
             // 排障/演示用：DSH_LAUNCHER_FORCE_DEPLOY=1 时强制走一遍部署向导
@@ -97,7 +118,12 @@ namespace DshLauncher
             }
             catch { }
 
-            if (!r.NeedsDeploy)
+            if (!r.SysSupported)
+            {
+                r.Headline = "系统不受支持";
+                r.Summary = r.SysProblem;
+            }
+            else if (!r.NeedsDeploy)
             {
                 r.Headline = "环境就绪";
                 r.Summary = "已检测到 Node.js " + r.NodeVersion + " 与本地 DSH，无需部署。";
@@ -161,11 +187,12 @@ namespace DshLauncher
 
         public Deployer()
         {
+            Add("检查系统兼容性", "Windows 10/11 64 位");
             Add("检查运行环境", "node / npm / npx 与版本门槛");
             Add("安装 Node.js LTS", "官方 MSI（校验 SHA-256）→ npmmirror → winget");
+            Add("解析版本与完整性", "取官方最新可安装版（或固定版）+ integrity");
             Add("准备工作目录", "创建 DSH 工作区");
-            Add("核验 DSH 版本与完整性", "npm view 校验下载源");
-            Add("拉取 DSH 到本地缓存", "npx 预下载");
+            Add("拉取 DSH 到本地缓存", "npx 预下载（带实时进度）");
             Add("创建快捷方式", "桌面与开始菜单");
         }
 
@@ -255,8 +282,8 @@ namespace DshLauncher
         {
             try
             {
-                bool ok = StepEnvironment(cfg) && StepNode(cfg) && StepWorkspace(cfg)
-                          && StepVerify(cfg) && StepFetch(cfg) && StepShortcuts(cfg);
+                bool ok = StepSystem(cfg) && StepEnvironment(cfg) && StepNode(cfg)
+                          && StepVersion(cfg) && StepWorkspace(cfg) && StepFetch(cfg) && StepShortcuts(cfg);
                 _succeeded = ok && !_cancel;
             }
             catch (Exception ex)
@@ -273,46 +300,63 @@ namespace DshLauncher
             }
         }
 
-        // ---- 1. 环境检测 ----
-        private bool StepEnvironment(AppConfig cfg)
+        // ---- 1. 系统兼容性 ----
+        private bool StepSystem(AppConfig cfg)
         {
             SetStep(0, StepState.Running, null);
+            string problem, warning;
+            bool ok = SysCheck.Supported(out problem, out warning);
+            if (!ok)
+            {
+                SetStep(0, StepState.Failed, problem);
+                Emit("系统不受支持，已中止部署：" + problem, LogLevel.Bad);
+                return false;
+            }
+            SetStep(0, StepState.Done, SysCheck.Describe());
+            if (!string.IsNullOrEmpty(warning)) Emit(warning, LogLevel.Warn);
+            return true;
+        }
+
+        // ---- 2. 环境检测 ----
+        private bool StepEnvironment(AppConfig cfg)
+        {
+            SetStep(1, StepState.Running, null);
             DeployReport r = Deployment.Check(cfg);
             Emit("Node.js：" + (r.NodePresent ? r.NodeVersion + "（" + r.NodePath + "）" : "未找到"), LogLevel.Dim);
             Emit("npm：" + (r.NpmReady ? "已找到" : "未找到") + "   npx：" + (r.NpxReady ? "已找到" : "未找到"), LogLevel.Dim);
             if (r.NodeReady && r.NpmReady && r.NpxReady)
             {
-                SetStep(0, StepState.Done, "Node.js " + r.NodeVersion + " 可用");
+                SetStep(1, StepState.Done, "Node.js " + r.NodeVersion + " 可用");
                 return true;
             }
-            SetStep(0, StepState.Done, r.NodePresent ? "Node.js " + r.NodeVersion + " 不达标" : "未找到 Node.js");
+            SetStep(1, StepState.Done, r.NodePresent ? "Node.js " + r.NodeVersion + " 不达标" : "未找到 Node.js");
             return true;
         }
 
-        // ---- 2. Node.js 安装 ----
+        // ---- 3. Node.js 安装 ----
         private bool StepNode(AppConfig cfg)
         {
             DeployReport r = Deployment.Check(cfg);
             if (r.NodeReady && r.NpmReady)
             {
-                SetStep(1, StepState.Skipped, "已就绪，跳过安装");
+                SetStep(2, StepState.Skipped, "已就绪，跳过安装");
                 return true;
             }
 
-            SetStep(1, StepState.Running, null);
-            if (!NodeInstaller.InstallOfficial(this)) Emit("Node.js 官方源未完成，改用 npmmirror 镜像。", LogLevel.Warn);
+            SetStep(2, StepState.Running, null);
+            if (!NodeInstaller.InstallOfficial(cfg, this)) Emit("Node.js 官方源未完成，改用 npmmirror 镜像。", LogLevel.Warn);
             NodeRefreshPath();
-            if (!NodeInstaller.IsReady()) { if (!NodeInstaller.InstallMirror(this)) Emit("npmmirror 镜像未完成，改用 winget。", LogLevel.Warn); }
+            if (!NodeInstaller.IsReady(cfg)) { if (!NodeInstaller.InstallMirror(cfg, this)) Emit("npmmirror 镜像未完成，改用 winget。", LogLevel.Warn); }
             NodeRefreshPath();
-            if (!NodeInstaller.IsReady()) { if (!NodeInstaller.InstallWinget(this)) Emit("winget 未完成。", LogLevel.Warn); }
+            if (!NodeInstaller.IsReady(cfg)) { if (!NodeInstaller.InstallWinget(this)) Emit("winget 未完成。", LogLevel.Warn); }
             NodeRefreshPath();
 
-            if (NodeInstaller.IsReady())
+            if (NodeInstaller.IsReady(cfg))
             {
-                SetStep(1, StepState.Done, "Node.js 安装完成");
+                SetStep(2, StepState.Done, "Node.js 安装完成");
                 return true;
             }
-            SetStep(1, StepState.Failed, "需要手动安装 Node.js LTS");
+            SetStep(2, StepState.Failed, "需要手动安装 Node.js LTS");
             Emit("三个安装渠道都未成功，请手动安装 Node.js LTS 后重试：https://nodejs.org/en/download", LogLevel.Bad);
             try
             {
@@ -346,15 +390,15 @@ namespace DshLauncher
             catch { }
         }
 
-        // ---- 3. 工作目录 ----
+        // ---- 5. 工作目录 ----
         private bool StepWorkspace(AppConfig cfg)
         {
-            SetStep(2, StepState.Running, null);
+            SetStep(4, StepState.Running, null);
             try
             {
                 if (string.IsNullOrEmpty(cfg.Workspace))
                 {
-                    SetStep(2, StepState.Failed, "工作目录未设置");
+                    SetStep(4, StepState.Failed, "工作目录未设置");
                     return false;
                 }
                 if (!Directory.Exists(cfg.Workspace))
@@ -363,96 +407,177 @@ namespace DshLauncher
                     Emit("已创建工作目录：" + cfg.Workspace, LogLevel.Good);
                 }
                 else Emit("工作目录已存在：" + cfg.Workspace, LogLevel.Dim);
-                SetStep(2, StepState.Done, cfg.Workspace);
+                SetStep(4, StepState.Done, cfg.Workspace);
                 return true;
             }
             catch (Exception ex)
             {
-                SetStep(2, StepState.Failed, ex.Message);
+                SetStep(4, StepState.Failed, ex.Message);
                 Emit("创建工作目录失败：" + ex.Message, LogLevel.Bad);
                 return false;
             }
         }
 
-        // ---- 4. 版本核验 ----
-        private bool StepVerify(AppConfig cfg)
+        // ---- 4. 版本与完整性 ----
+        private DshPackage _pkg;
+        private string _registry;
+
+        private bool StepVersion(AppConfig cfg)
         {
             SetStep(3, StepState.Running, null);
-            string registry;
-            bool ok = SourceVerify.Resolve(cfg, Emit, out registry);
-            if (!ok)
+            DshPackage p = VersionResolve.Resolve(cfg, Emit);
+            if (p == null || string.IsNullOrEmpty(p.Version))
             {
-                SetStep(3, StepState.Failed, "下载源核验失败");
+                SetStep(3, StepState.Failed, "无法确定要安装的版本");
                 return false;
             }
-            _registry = registry;
-            SetStep(3, StepState.Done, cfg.PinnedVersion + " · " + registry.Replace("https://", ""));
+            _pkg = p;
+            _registry = p.Registry;
+
+            Emit("目标版本：" + p.Version + "（" + p.Source + "）" +
+                 (p.LocalVersion.Length > 0 ? "；本地已有 " + p.LocalVersion : ""), LogLevel.Dim);
+            if (p.Downgrade)
+                Emit("本地缓存的 " + p.LocalVersion + " 比目标 " + p.Version + " 新，本次不覆盖（防降级）。", LogLevel.Warn);
+
+            if (cfg.VerifyIntegrity && p.Integrity.Length == 0)
+            {
+                SetStep(3, StepState.Failed, "该下载源未返回 integrity");
+                Emit("下载源没有返回 integrity，出于安全考虑不再继续。可在设置里关闭完整性核验后重试。", LogLevel.Bad);
+                return false;
+            }
+            SetStep(3, StepState.Done, p.Version + " · " + p.Source + " · " + p.Registry.Replace("https://", ""));
+
+            // 把解析结果写回配置：否则会出现"部署时装最新版、启动时仍按旧 pin 启动"的两头不一致
+            if (!p.Downgrade && (cfg.PinnedVersion != p.Version || cfg.PinnedIntegrity != p.Integrity))
+            {
+                cfg.PinnedVersion = p.Version;
+                cfg.PinnedIntegrity = p.Integrity;
+                cfg.Registry = p.Registry;
+                try { cfg.Save(); } catch { }
+                Emit("已把 " + p.Version + " 记为当前版本，之后启动都用它。", LogLevel.Dim);
+            }
             return true;
         }
 
-        private string _registry;
-
-        // ---- 5. 预下载 ----
+        // ---- 6. 预下载（带实时进度）----
         private bool StepFetch(AppConfig cfg)
         {
-            SetStep(4, StepState.Running, null);
+            SetStep(5, StepState.Running, null);
             AppConfig probe = Clone(cfg);
             if (!string.IsNullOrEmpty(_registry)) probe.Registry = _registry;
             probe.LaunchMode = "npx";
+
+            string targetVersion = (_pkg != null && _pkg.Version.Length > 0) ? _pkg.Version : cfg.PinnedVersion;
+            // 防降级：目标比本地旧时，改为就地校验本地那份，而不是把一个旧版本拉下来
+            if (_pkg != null && _pkg.Downgrade && _pkg.LocalVersion.Length > 0)
+            {
+                Emit("目标版本 " + targetVersion + " 比本地 " + _pkg.LocalVersion + " 旧，改为校验本地这一份。", LogLevel.Warn);
+                targetVersion = _pkg.LocalVersion;
+            }
 
             string node = DshLocator.FindNode(probe);
             string npxCli = DshLocator.FindNpxCliJs(node);
             if (node == null || npxCli == null)
             {
-                SetStep(4, StepState.Failed, "缺少 node / npx");
+                SetStep(5, StepState.Failed, "缺少 node / npx");
                 return false;
             }
 
             Dictionary<string, string> env = new Dictionary<string, string>();
             if (!string.IsNullOrEmpty(_registry)) env["npm_config_registry"] = _registry;
 
-            string args = "\"" + npxCli + "\" -y @deepseek-ai/dsh@" + cfg.PinnedVersion + " --version";
-            Emit("正在把 DSH 拉取到本地缓存（首次可能较慢）…", LogLevel.Info);
+            string args = "\"" + npxCli + "\" -y @deepseek-ai/dsh@" + targetVersion + " --version";
+            Emit("正在把 DSH " + targetVersion + " 拉取到本地缓存（首次可能较慢）…", LogLevel.Info);
+
+            // 真实进度：旧脚本同款 —— 每秒报 npm 缓存增量与近似写入速度，不编造百分比
+            string cacheRoot = NpmCacheProbe.CacheRoot(probe);
+            long baseBytes = NpmCacheProbe.SizeBytes(cacheRoot);
+            bool stopTicker = false;
+            Thread ticker = new Thread(delegate()
+            {
+                long prev = baseBytes;
+                DateTime prevAt = DateTime.Now;
+                DateTime t0 = DateTime.Now;
+                while (!stopTicker)
+                {
+                    Thread.Sleep(1000);
+                    if (stopTicker) break;
+                    long now;
+                    try { now = NpmCacheProbe.SizeBytes(cacheRoot); }
+                    catch { now = prev; }
+                    double span = Math.Max(0.1, (DateTime.Now - prevAt).TotalSeconds);
+                    double speed = Math.Max(0d, (double)(now - prev) / 1048576d) / span;
+                    double growth = Math.Max(0d, (double)(now - baseBytes) / 1048576d);
+                    int el = (int)(DateTime.Now - t0).TotalSeconds;
+                    Emit("已等待 " + (el / 60).ToString("00") + ":" + (el % 60).ToString("00") +
+                         "｜npm 缓存增加 " + growth.ToString("0.0") + " MB" +
+                         "｜近似写入 " + speed.ToString("0.0") + " MB/s（不是整机网速）", LogLevel.Dim);
+                    prev = now;
+                    prevAt = DateTime.Now;
+                }
+            });
+            ticker.IsBackground = true;
+            ticker.Start();
 
             DateTime started = DateTime.Now;
             string stdout, stderr;
-            int code = HiddenRunner.Run(node, args, cfg.Workspace, env, 600000, out stdout, out stderr);
+            int code;
+            try { code = HiddenRunner.Run(node, args, cfg.Workspace, env, 600000, out stdout, out stderr); }
+            finally { stopTicker = true; }
+
             if (_cancel)
             {
-                SetStep(4, StepState.Skipped, "已取消");
+                SetStep(5, StepState.Skipped, "已取消");
                 return false;
             }
             string text = (stdout + " " + stderr).Trim();
             if (code != 0)
             {
-                SetStep(4, StepState.Failed, text.Length > 0 ? Short(text) : ("退出码 " + code));
-                Emit("预下载失败：" + Short(text), LogLevel.Bad);
+                SetStep(5, StepState.Failed, text.Length > 0 ? Short(text) : ("退出码 " + code));
+                Emit("拉取失败：" + Short(text), LogLevel.Bad);
                 return false;
             }
-            Emit("已缓存 DSH：" + Short(text) + "（耗时 " + (int)(DateTime.Now - started).TotalSeconds + " 秒）", LogLevel.Good);
-            SetStep(4, StepState.Done, "已缓存 " + Short(text));
+
+            // 落地校验：命令成功了不算数，缓存里必须真的有一份可用的 DSH
+            AppConfig scan = new AppConfig();
+            scan.DshEntry = "";
+            string cached = VersionResolve.LocalCachedVersion(scan);
+            if (string.IsNullOrEmpty(cached))
+            {
+                SetStep(5, StepState.Failed, "拉取后仍找不到本地缓存");
+                Emit("npx 报告成功，但本地缓存里找不到 DSH —— 部署没有真正完成。", LogLevel.Bad);
+                return false;
+            }
+
+            int secs = (int)(DateTime.Now - started).TotalSeconds;
+            Emit("已缓存 DSH " + cached + "（耗时 " + secs + " 秒）：" + Short(text), LogLevel.Good);
+            SetStep(5, StepState.Done, "已缓存 " + cached + " · " + secs + " 秒");
             return true;
         }
 
-        // ---- 6. 快捷方式 ----
+        // ---- 7. 快捷方式 ----
         private bool StepShortcuts(AppConfig cfg)
         {
-            SetStep(5, StepState.Running, null);
-            try
-            {
-                string exe = AppPaths.ExePath;
-                string desktop = Path.Combine(Shortcuts.DesktopDir, "DSH 启动器.lnk");
-                string menu = Path.Combine(Shortcuts.ProgramsDir, "DSH 启动器.lnk");
-                bool a = Shortcuts.Create(desktop, exe, "", AppPaths.InstallDir, exe, 1);
-                bool b = Shortcuts.Create(menu, exe, "", AppPaths.InstallDir, exe, 1);
-                SetStep(5, a || b ? StepState.Done : StepState.Failed, a ? "桌面快捷方式已就绪" : "快捷方式创建失败");
-                return true;
-            }
+            SetStep(6, StepState.Running, null);
+            bool[] ok;
+            try { ok = Shortcuts.CreateAppLinks(AppPaths.ExePath, AppPaths.InstallDir); }
             catch (Exception ex)
             {
-                SetStep(5, StepState.Failed, ex.Message);
-                return true;   // 快捷方式失败不阻断部署
+                SetStep(6, StepState.Failed, ex.Message);
+                Emit("创建快捷方式失败：" + ex.Message, LogLevel.Bad);
+                return false;      // 不再"失败也报成功"
             }
+
+            bool a = ok[0], b = ok[1];
+            if (a && b)
+            {
+                SetStep(6, StepState.Done, "桌面与开始菜单快捷方式已就绪");
+                return true;
+            }
+            SetStep(6, StepState.Failed, a ? "桌面已就绪，开始菜单失败" : (b ? "开始菜单已就绪，桌面失败" : "两处都失败"));
+            Emit("快捷方式没有全部创建成功（桌面=" + (a ? "OK" : "失败") + "，开始菜单=" + (b ? "OK" : "失败") +
+                 "）。可在设置里点「创建 / 修复快捷方式」重试。", LogLevel.Warn);
+            return false;
         }
 
         private static string Short(string s)
@@ -470,6 +595,7 @@ namespace DshLauncher
             c.AutoOpenBrowser = src.AutoOpenBrowser; c.EdgeAppMode = src.EdgeAppMode;
             c.CloseToTray = src.CloseToTray; c.AutoStart = src.AutoStart;
             c.NodePath = src.NodePath; c.DshEntry = src.DshEntry;
+            c.VersionMode = src.VersionMode; c.CleanupDir = src.CleanupDir;
             return c;
         }
     }
@@ -483,32 +609,38 @@ namespace DshLauncher
         private const string OfficialIndex = "https://nodejs.org/dist/index.json";
         private const string MirrorIndex = "https://registry.npmmirror.com/-/binary/node/index.json";
 
-        public static bool IsReady()
+        /// <summary>Node 是否就绪。注意必须带上 cfg —— 用户可能把 node 装在非 PATH 的自定义位置。</summary>
+        public static bool IsReady(AppConfig cfg)
         {
-            AppConfig probe = new AppConfig();
-            string node = DshLocator.FindNode(probe);
+            if (cfg == null) cfg = new AppConfig();
+            string node = DshLocator.FindNode(cfg);
             if (node == null) return false;
-            DeployReport r = Deployment.Check(probe);
+            DeployReport r = Deployment.Check(cfg);
             return r.NodeReady && r.NpmReady;
         }
 
-        public static bool InstallOfficial(Deployer d)
+        public static bool InstallOfficial(AppConfig cfg, Deployer d)
         {
-            return InstallFrom(d, OfficialIndex, "nodejs.org", "https://nodejs.org/dist/");
+            return InstallFrom(cfg, d, OfficialIndex, "nodejs.org", new string[] { "https://nodejs.org/dist/" });
         }
 
-        public static bool InstallMirror(Deployer d)
+        public static bool InstallMirror(AppConfig cfg, Deployer d)
         {
-            // 镜像下 MSI，校验值仍取官方 SHASUMS256.txt
-            return InstallFrom(d, MirrorIndex, "npmmirror", "https://nodejs.org/dist/");
+            // 镜像下 MSI；校验值**优先取镜像自己那份 SHASUMS256**（实测与官方逐字节一致），
+            // 取不到才回落官方 —— 否则 nodejs.org 不可达时这条降级链等于不存在。
+            return InstallFrom(cfg, d, MirrorIndex, "npmmirror", new string[]
+            {
+                "https://registry.npmmirror.com/-/binary/node/",
+                "https://nodejs.org/dist/"
+            });
         }
 
-        private static bool InstallFrom(Deployer d, string indexUrl, string sourceName, string checksumBase)
+        private static bool InstallFrom(AppConfig cfg, Deployer d, string indexUrl, string sourceName, string[] checksumBases)
         {
             try
             {
                 d.Report("正在从 " + sourceName + " 查询 Node.js LTS 版本…", LogLevel.Info);
-                string index = HttpGetString(indexUrl, 20000);
+                string index = NetFetch.GetString(cfg, indexUrl, 20000);
                 string version = PickLtsVersion(index);
                 if (version == null)
                 {
@@ -521,13 +653,24 @@ namespace DshLauncher
                     : "https://nodejs.org/dist/" + version + "/";
 
                 string msi = Path.Combine(Path.GetTempPath(), file);
+                try { if (File.Exists(msi)) File.Delete(msi); } catch { }
                 d.Report("正在下载 Node.js " + version + "（约 30 MB）…", LogLevel.Info);
-                DownloadFile(baseUrl + file, msi, d);
+                if (!NetFetch.Download(cfg, baseUrl + file, msi, d.Report, 300000))
+                {
+                    d.Report(sourceName + " 的安装包下载失败（.NET 与 node 两条路径都没成功）。", LogLevel.Warn);
+                    return false;
+                }
 
                 d.Report("正在校验安装包 SHA-256…", LogLevel.Dim);
-                string sums = HttpGetString(checksumBase + version + "/SHASUMS256.txt", 30000);
+                string sums = null;
+                foreach (string cb in checksumBases)
+                {
+                    try { sums = NetFetch.GetString(cfg, cb + version + "/SHASUMS256.txt", 30000); }
+                    catch { sums = null; }
+                    if (!string.IsNullOrEmpty(sums)) break;
+                }
                 string expected = FindChecksum(sums, file);
-                if (expected == null) { d.Report("未找到官方校验值。", LogLevel.Warn); return false; }
+                if (expected == null) { d.Report("未找到校验值（镜像与官方都没取到）。", LogLevel.Warn); return false; }
                 string actual = Sha256(msi);
                 if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
                 {
@@ -708,7 +851,12 @@ namespace DshLauncher
                 else
                 {
                     string npm = DshLocator.SearchPath("npm.cmd");
-                    if (npm == null) { if (log != null) log("找不到 npm，跳过完整性核验。", LogLevel.Warn); return true; }
+                    if (npm == null)
+                    {
+                        // 找不到 npm 时不再"静默认为通过"：这一步是完整性核验，跳过就等于没核验
+                        if (log != null) log("找不到 npm，无法完成完整性核验；请在设置里关闭核验或先装好 npm。", LogLevel.Bad);
+                        return false;
+                    }
                     file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
                     args = "/d /s /c \"\"" + npm + "\" view @deepseek-ai/dsh@" + cfg.PinnedVersion +
                            " version dist.integrity --json --registry=" + reg + " --fetch-timeout=8000 --fetch-retries=0\"";

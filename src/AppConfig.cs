@@ -25,12 +25,44 @@ namespace DshLauncher
         public bool BootAnimation = true;
         public bool TransitionAnimation = true;
 
+        /// <summary>
+        /// DSH 版本策略：latest = 动态取官方最新可安装版（默认，对齐旧安装脚本）；
+        /// pinned = 固定 PinnedVersion + PinnedIntegrity（可复现）。
+        /// </summary>
+        public string VersionMode = "latest";
+
+        /// <summary>
+        /// 迁移安装位置后要清理的旧目录。由**新实例**在下次启动时删除本体的旧副本
+        /// （迁移当下旧 exe 还在运行，删不掉）。
+        /// </summary>
+        public string CleanupDir = "";
+
+        /// <summary>
+        /// 启动器安装位置。空 = 绿色免安装（就地运行）。
+        /// 这是**用户的选择**，不是代码里的默认值：首次运行必须由用户点一下才算数。
+        /// </summary>
+        public string InstallDir = "";
+
+        /// <summary>是否已经问过用户「装到哪里」。false 时下次启动会弹选择框（不会静默采用默认值）。</summary>
+        public bool InstallAsked = false;
+
+        /// <summary>绿色免安装：程序就在自己所在目录里跑，不做任何安装动作。</summary>
+        public bool IsPortable { get { return string.IsNullOrEmpty(InstallDir); } }
+
         public static string ConfigDir
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DSH Launcher"); }
         }
 
         public static string ConfigPath { get { return Path.Combine(ConfigDir, "config.ini"); } }
+
+        /// <summary>建议的安装位置（只在选择框里作为「使用默认位置」这一项出现，绝不静默使用）。</summary>
+        public static string SuggestedInstallDir()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "DSH Launcher");
+        }
 
         public static string DefaultWorkspace()
         {
@@ -81,6 +113,10 @@ namespace DshLauncher
                         case "dshentry": cfg.DshEntry = val; break;
                         case "bootanimation": cfg.BootAnimation = ParseBool(val, cfg.BootAnimation); break;
                         case "transitionanimation": cfg.TransitionAnimation = ParseBool(val, cfg.TransitionAnimation); break;
+                        case "installdir": cfg.InstallDir = val; break;
+                        case "installasked": cfg.InstallAsked = ParseBool(val, cfg.InstallAsked); break;
+                        case "versionmode": cfg.VersionMode = val.ToLowerInvariant() == "pinned" ? "pinned" : "latest"; break;
+                        case "cleanupdir": cfg.CleanupDir = val; break;
                     }
                 }
             }
@@ -97,6 +133,10 @@ namespace DshLauncher
                 sb.AppendLine("# DSH 启动器配置（改动后重启启动器生效）");
                 sb.AppendLine("# workspace   DSH 打开的工作目录");
                 sb.AppendLine("# launchmode  npx = 经 npm 启动（可校验完整性，推荐）；direct = 直接启动本地已缓存版本（最快）");
+                sb.AppendLine("# installdir  启动器安装位置；留空 = 绿色免安装（就地运行）");
+                sb.AppendLine("# installasked 是否已经问过用户安装位置（0 = 下次运行会弹选择框）");
+                sb.AppendLine("# versionmode latest = 自动解析官方最新可安装版（推荐）；pinned = 固定用 pinnedversion");
+                sb.AppendLine("# cleanupdir  迁移安装位置后待清理的旧目录（由新实例自动清空，一般不用手改）");
                 sb.AppendLine("workspace=" + Workspace);
                 sb.AppendLine("port=" + Port.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("launchmode=" + LaunchMode);
@@ -112,6 +152,10 @@ namespace DshLauncher
                 sb.AppendLine("dshentry=" + DshEntry);
                 sb.AppendLine("bootanimation=" + (BootAnimation ? "1" : "0"));
                 sb.AppendLine("transitionanimation=" + (TransitionAnimation ? "1" : "0"));
+                sb.AppendLine("installdir=" + InstallDir);
+                sb.AppendLine("installasked=" + (InstallAsked ? "1" : "0"));
+                sb.AppendLine("versionmode=" + VersionMode);
+                sb.AppendLine("cleanupdir=" + CleanupDir);
                 File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
             }
             catch { }
@@ -139,6 +183,41 @@ namespace DshLauncher
                 problems.Add("工作目录不存在：" + Workspace);
             if (Port < 1 || Port > 65535)
                 problems.Add("端口不合法：" + Port);
+            return problems;
+        }
+
+        /// <summary>
+        /// 配置与磁盘的一致性核对（只报告，不拦截启动）。
+        /// 覆盖两类真实踩过的坑：安装目录被删/被挪之后快捷方式全失效、自启项变孤儿。
+        /// </summary>
+        public List<string> ConsistencyProblems()
+        {
+            List<string> problems = new List<string>();
+            try
+            {
+                if (!string.IsNullOrEmpty(InstallDir) && !Directory.Exists(InstallDir))
+                    problems.Add("配置的安装位置不存在：" + InstallDir);
+
+                if (!string.IsNullOrEmpty(InstallDir))
+                {
+                    string exe = AppPaths.ExePath;
+                    string dir = AppPaths.InstallDir;
+                    bool same = false;
+                    try
+                    {
+                        same = string.Equals(Path.GetFullPath(dir).TrimEnd('\\'),
+                                             Path.GetFullPath(InstallDir).TrimEnd('\\'),
+                                             StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { }
+                    if (!same)
+                        problems.Add("当前程序不在配置的安装位置里运行（现在：" + dir + "）");
+                }
+
+                foreach (string link in Shortcuts.BrokenLinks())
+                    problems.Add("快捷方式目标已失效：" + link);
+            }
+            catch { }
             return problems;
         }
     }

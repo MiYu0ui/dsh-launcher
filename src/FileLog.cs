@@ -22,7 +22,7 @@ namespace DshLauncher
             {
                 if (_path == null)
                 {
-                    string dir = System.IO.Path.Combine(AppPaths.InstallDir, "logs");
+                    string dir = AppPaths.LogsDir;
                     try { Directory.CreateDirectory(dir); }
                     catch { dir = System.IO.Path.GetTempPath(); }
                     _path = System.IO.Path.Combine(dir, "launcher-" + DateTime.Now.ToString("yyyyMMdd") + ".log");
@@ -48,7 +48,13 @@ namespace DshLauncher
         }
     }
 
-    /// <summary>本程序自身的路径信息。</summary>
+    /// <summary>
+    /// 本程序自身的路径信息。这里有两个**不同**的目录，别混：
+    ///   InstallDir = exe 所在目录（程序本体在哪，绿色版就是解压目录）
+    ///   DataDir    = %LOCALAPPDATA%\DSH Launcher（运行期数据：日志、备份、迁移前的旧快捷方式）
+    /// 运行期数据刻意不放在 exe 旁边：绿色分发包只打包 exe 目录，就不会把日志和备份一起带出去；
+    /// 用户挪动 exe 或改安装位置时，日志也不会跟着丢。
+    /// </summary>
     internal static class AppPaths
     {
         public static string ExePath
@@ -61,5 +67,19 @@ namespace DshLauncher
         }
 
         public static string InstallDir { get { return System.IO.Path.GetDirectoryName(ExePath); } }
+
+        /// <summary>运行期数据根目录：%LOCALAPPDATA%\DSH Launcher</summary>
+        public static string DataDir
+        {
+            get
+            {
+                return System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DSH Launcher");
+            }
+        }
+
+        public static string LogsDir { get { return System.IO.Path.Combine(DataDir, "logs"); } }
+
+        public static string BackupDir { get { return System.IO.Path.Combine(DataDir, "backup"); } }
     }
 }

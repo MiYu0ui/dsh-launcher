@@ -20,7 +20,9 @@ namespace DshLauncher
             sb.AppendLine("生成时间      : " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             sb.AppendLine("启动器版本    : v" + BuildInfo.Version + "（构建于 " + BuildInfo.BuildStamp + "）");
             sb.AppendLine("程序路径      : " + AppPaths.ExePath);
-            sb.AppendLine("安装目录      : " + AppPaths.InstallDir);
+            sb.AppendLine("程序所在目录  : " + AppPaths.InstallDir);
+            sb.AppendLine("安装位置(配置): " + (cfg.IsPortable ? "绿色免安装（就地运行）" : cfg.InstallDir));
+            sb.AppendLine("运行数据目录  : " + AppPaths.DataDir);
             sb.AppendLine();
 
             sb.AppendLine("== 运行环境 ==");
@@ -112,7 +114,7 @@ namespace DshLauncher
             StringBuilder sb = new StringBuilder();
             try
             {
-                string dir = Path.Combine(AppPaths.InstallDir, "logs");
+                string dir = AppPaths.LogsDir;
                 if (!Directory.Exists(dir)) return "(日志目录不存在：" + dir + ")";
 
                 List<string> files = new List<string>(Directory.GetFiles(dir, "launcher-*.log"));

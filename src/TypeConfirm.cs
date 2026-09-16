@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -7,14 +6,13 @@ using System.Windows.Forms;
 namespace DshLauncher
 {
     /// <summary>
-    /// 档案终端风格的自绘对话框，替代系统 MessageBox。
-    /// 与主界面同一套语言：绿色顶边、细线卡片、巡行彗尾、四角刻度、宽字距标注、直角细线按钮。
-    /// 字段用"标签 + 等宽值"两列排版（单行省略号，不会再像系统框那样把长路径折成两行）。
+    /// 危险操作的「打字确认」对话框：涉及凭据 / 会话 / 配置这类私密数据的卸载，
+    /// 必须让用户手打出确认词才放行。
+    /// 版式与 ConfirmDialog 完全一致（绿顶边、巡行彗尾、四角刻度、宽字距标注），
+    /// 只是多一行等宽输入框与一句红色要求。
     /// </summary>
-    internal class ConfirmDialog : Form
+    internal class TypeConfirm : Form
     {
-        public enum Choice { Cancel, Confirm, Alt, Alt2 }
-
         private const int DesignW = 640;
         private const int Pad = 28;
         private const int HeaderH = 76;
@@ -24,33 +22,30 @@ namespace DshLauncher
         private readonly string _message;
         private readonly string _warning;
         private readonly string[] _fields;
-        private readonly bool _danger;
-        private readonly bool _infoOnly;
-        private readonly string _altText;      // 最左按钮（第三选项）→ Choice.Alt
-        private readonly string _thirdText;    // 中间按钮；给定时取代「取消」→ Choice.Alt2
+        private readonly string _want;
 
+        private TextBox _input;
+        private FlatButton _ok;
         private int _messageH;
         private int _warningH;
         private int _fieldsTop;
-        private Choice _result = Choice.Cancel;
+        private int _inputY;
+        private bool _confirmed;
 
-        private ConfirmDialog(string track, string headline, string message, string[] fields,
-                              string warning, string confirmText, string altText, string thirdText, bool danger, bool infoOnly)
+        private TypeConfirm(string track, string headline, string message, string[] fields,
+                            string warning, string wantWord, string okText)
         {
             _track = track;
             _headline = headline;
             _message = message == null ? "" : message;
             _fields = fields;
             _warning = warning;
-            _danger = danger;
-            _infoOnly = infoOnly;
-            _altText = altText;
-            _thirdText = thirdText;
+            _want = wantWord;
 
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             FormBorderStyle = FormBorderStyle.None;
-            StartPosition = infoOnly ? FormStartPosition.CenterParent : FormStartPosition.CenterParent;
+            StartPosition = FormStartPosition.CenterParent;
             ShowInTaskbar = false;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -61,7 +56,7 @@ namespace DshLauncher
             ForeColor = Theme.Ink;
             AllowTransparency = true;
 
-            Layout(confirmText);
+            Layout(okText);
             Anim.Track(this, 1);
         }
 
@@ -81,59 +76,30 @@ namespace DshLauncher
             base.Dispose(disposing);
         }
 
-        // ---------------- 静态入口 ----------------
-        /// <summary>只读提示（一个「知道了」按钮）。</summary>
-        public static void Info(IWin32Window owner, string track, string headline, string message,
-                                string[] fields, string warning)
+        /// <summary>返回 true = 用户打对了确认词并点了确认。</summary>
+        public static bool Ask(IWin32Window owner, string track, string headline, string message,
+                               string[] fields, string warning, string wantWord, string okText)
         {
-            using (ConfirmDialog d = new ConfirmDialog(track, headline, message, fields, warning, "知道了", null, null, false, true))
-                d.ShowDialog(owner);
-        }
-
-        /// <summary>确认（取消 / 确认，可选第三选项）。</summary>
-        public static Choice Show(IWin32Window owner, string track, string headline, string message,
-                                  string[] fields, string warning, string confirmText, bool danger)
-        {
-            return Show(owner, track, headline, message, fields, warning, confirmText, null, danger);
-        }
-
-        public static Choice Show(IWin32Window owner, string track, string headline, string message,
-                                  string[] fields, string warning, string confirmText, string altText, bool danger)
-        {
-            return Show(owner, track, headline, message, fields, warning, confirmText, altText, null, danger);
-        }
-
-        /// <summary>
-        /// 三选项确认：最左 [altText] …… 中间 [thirdText]，最右 [confirmText]。
-        /// thirdText 给定时中间那个按钮就是它（返回 Choice.Alt2），此时没有「取消」按钮；
-        /// 右上角 ✕ 与 Esc 仍然返回 Choice.Cancel，专门用来表达「还没决定」。
-        /// </summary>
-        public static Choice Show(IWin32Window owner, string track, string headline, string message,
-                                  string[] fields, string warning, string confirmText, string altText,
-                                  string thirdText, bool danger)
-        {
-            using (ConfirmDialog d = new ConfirmDialog(track, headline, message, fields, warning, confirmText, altText, thirdText, danger, false))
+            using (TypeConfirm d = new TypeConfirm(track, headline, message, fields, warning, wantWord, okText))
             {
                 d.ShowDialog(owner);
-                return d._result;
+                return d._confirmed;
             }
         }
 
         // ---------------- 布局 ----------------
-        private void Layout(string confirmText)
+        private void Layout(string okText)
         {
             int contentW = Theme.S(DesignW) - Theme.S(Pad * 2);
-
             using (Graphics g = CreateGraphics())
             {
-                // 注意单位：CreateGraphics 是当前 DPI 的物理像素，布局用的是设计像素 → 要除以缩放
                 float sc = Theme.Scale <= 0f ? 1f : Theme.Scale;
                 _messageH = _message.Length == 0 ? 0
-                    : (int)Math.Ceiling(TextRenderer.MeasureText(g, _message, Theme.FontUi, new Size(contentW, int.MaxValue),
-                                               TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height / sc);
+                    : (int)Math.Ceiling(TextRenderer.MeasureText(g, _message, Theme.FontUi,
+                        new Size(contentW, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height / sc);
                 _warningH = string.IsNullOrEmpty(_warning) ? 0
-                    : (int)Math.Ceiling(TextRenderer.MeasureText(g, _warning, Theme.FontUiBold, new Size(contentW, int.MaxValue),
-                                               TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height / sc);
+                    : (int)Math.Ceiling(TextRenderer.MeasureText(g, _warning, Theme.FontUiBold,
+                        new Size(contentW, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height / sc);
             }
 
             int y = Theme.S(HeaderH) + Theme.S(16);
@@ -142,73 +108,68 @@ namespace DshLauncher
             if (_messageH > 0) y += _messageH + Theme.S(18);
             _fieldsTop = y;
             if (_fields != null) y += _fields.Length * Theme.S(24) + Theme.S(6);
-            if (_warningH > 0) y += _warningH + Theme.S(12);
+            if (_warningH > 0) y += _warningH + Theme.S(14);
+
+            y += Theme.S(10);                                  // 「请输入」提示行
+            y += Theme.S(20);
+            _inputY = y;
+            y += Theme.S(30);
+
             y += Theme.S(16);                                  // 按钮行上方留白
             int btnH = Theme.S(42);
             int totalH = y + btnH + Theme.S(Pad);
             ClientSize = new Size(Theme.S(DesignW), totalH);
 
-            // 按钮：右侧 [确认]；中间默认是「取消」，给了 thirdText 就换成第三选项；altText 放最左
-            bool hasThird = !string.IsNullOrEmpty(_thirdText);
-            int btnW = Theme.S(hasThird ? 136 : 120), altW = Theme.S(hasThird ? 136 : 150);
+            int btnW = Theme.S(136);
             int by = totalH - Theme.S(Pad) - btnH;
             int rx = Theme.S(DesignW) - Theme.S(Pad);
 
-            FlatButton ok = new FlatButton();
-            ok.Text = _infoOnly ? "知道了" : confirmText;
-            ok.Primary = !_danger;
-            ok.Danger = _danger;
-            ok.Location = new Point(rx - btnW, by);
-            ok.Size = new Size(btnW, btnH);
-            ok.BackColor = Theme.Bg;
-            ok.Click += delegate(object s, EventArgs e)
+            _input = new TextBox();
+            _input.Location = new Point(Theme.S(Pad), Theme.S(_inputY));
+            _input.Size = new Size(Theme.S(DesignW - Pad * 2), Theme.S(28));
+            _input.BorderStyle = BorderStyle.FixedSingle;
+            _input.BackColor = Theme.PanelHi;
+            _input.ForeColor = Theme.Ink;
+            _input.Font = Theme.FontMono;
+            _input.TextChanged += delegate(object s, EventArgs e) { SyncOk(); };
+            Controls.Add(_input);
+
+            _ok = new FlatButton();
+            _ok.Text = okText;
+            _ok.Danger = true;
+            _ok.Enabled = false;
+            _ok.Location = new Point(rx - btnW, by);
+            _ok.Size = new Size(btnW, btnH);
+            _ok.BackColor = Theme.Bg;
+            _ok.Click += delegate(object s, EventArgs e)
             {
-                _result = _infoOnly ? Choice.Confirm : Choice.Confirm;
+                if (!Matches()) return;
+                _confirmed = true;
                 DialogResult = DialogResult.OK;
                 Close();
             };
-            Controls.Add(ok);
+            Controls.Add(_ok);
 
-            if (!_infoOnly)
+            FlatButton cancel = new FlatButton();
+            cancel.Text = "取消";
+            cancel.Location = new Point(rx - btnW * 2 - Theme.S(10), by);
+            cancel.Size = new Size(Theme.S(104), btnH);
+            cancel.BackColor = Theme.Bg;
+            cancel.Click += delegate(object s, EventArgs e)
             {
-                FlatButton cancel = new FlatButton();
-                cancel.Text = hasThird ? _thirdText : "取消";
-                cancel.Location = new Point(rx - btnW * 2 - Theme.S(10), by);
-                cancel.Size = new Size(btnW, btnH);
-                cancel.BackColor = Theme.Bg;
-                cancel.Click += delegate(object s, EventArgs e)
-                {
-                    _result = hasThird ? Choice.Alt2 : Choice.Cancel;
-                    DialogResult = hasThird ? DialogResult.OK : DialogResult.Cancel;
-                    Close();
-                };
-                Controls.Add(cancel);
+                _confirmed = false;
+                DialogResult = DialogResult.Cancel;
+                Close();
+            };
+            Controls.Add(cancel);
 
-                if (!string.IsNullOrEmpty(_altText))
-                {
-                    FlatButton alt = new FlatButton();
-                    alt.Text = _altText;
-                    alt.Location = new Point(Theme.S(Pad), by);
-                    alt.Size = new Size(altW, btnH);
-                    alt.BackColor = Theme.Bg;
-                    alt.Click += delegate(object s, EventArgs e)
-                    {
-                        _result = Choice.Alt;
-                        DialogResult = DialogResult.OK;
-                        Close();
-                    };
-                    Controls.Add(alt);
-                }
-            }
-
-            // 右上角关闭
             ChromeButton close = new ChromeButton(ChromeButton.GlyphKind.Close);
             close.Location = new Point(Theme.S(DesignW - Pad - 26), Theme.S(8));
             close.Size = new Size(Theme.S(26), Theme.S(22));
             close.BackColor = Theme.Panel;
             close.Invoked += delegate(object s, EventArgs e)
             {
-                _result = Choice.Cancel;
+                _confirmed = false;
                 DialogResult = DialogResult.Cancel;
                 Close();
             };
@@ -216,21 +177,44 @@ namespace DshLauncher
             close.BringToFront();
         }
 
+        private bool Matches()
+        {
+            if (_input == null) return false;
+            return string.Equals(_input.Text.Trim(), _want, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void SyncOk()
+        {
+            if (_ok == null) return;
+            bool ok = Matches();
+            if (_ok.Enabled != ok) _ok.Enabled = ok;
+            Invalidate();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            try { _input.Focus(); } catch { }
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (keyData == Keys.Escape)
             {
-                _result = Choice.Cancel;
+                _confirmed = false;
                 DialogResult = DialogResult.Cancel;
                 Close();
                 return true;
             }
             if (keyData == Keys.Enter)
             {
-                _result = Choice.Confirm;
-                DialogResult = DialogResult.OK;
-                Close();
-                return true;
+                if (Matches())
+                {
+                    _confirmed = true;
+                    DialogResult = DialogResult.OK;
+                    Close();
+                }
+                return true;      // 没打对时回车不关闭，逼用户打完
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -252,24 +236,20 @@ namespace DshLauncher
             int right = w - Theme.S(Pad);
 
             Theme.Fill(g, ClientRectangle, Theme.Bg);
-            Theme.Fill(g, new Rectangle(0, 0, w, band), Theme.Green);
+            Theme.Fill(g, new Rectangle(0, 0, w, band), Theme.SignalAlert);
             Theme.Fill(g, new Rectangle(0, band, w, Theme.S(HeaderH) - band), Theme.Panel);
             Theme.Rule(g, 0, Theme.S(HeaderH) - 1, w, Theme.Line);
-            Theme.DrawLiveFrame(g, new Rectangle(0, 0, w - 1, h - 1), Theme.Line,
-                                _danger ? Theme.SignalAlert : Theme.Green, false, 6.2, 0.4);
+            Theme.DrawLiveFrame(g, new Rectangle(0, 0, w - 1, h - 1), Theme.Line, Theme.SignalAlert, false, 6.2, 0.4);
             Theme.CornerTicks(g, new Rectangle(Theme.S(9), Theme.S(9), w - Theme.S(19), h - Theme.S(19)), Theme.Line, Theme.S(11));
 
-            // 顶部标注
             Theme.DrawTracked(g, _track, Theme.FontMonoSmall, Theme.S(Pad), band + Theme.S(14), Theme.Sub, Theme.SF(1.6f));
 
             int y = Theme.S(HeaderH) + Theme.S(16);
             TextRenderer.DrawText(g, _headline, Theme.FontStatus,
-                new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(26)),
-                _danger ? Theme.SignalAlert : Theme.Ink,
+                new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(26)), Theme.SignalAlert,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             y += Theme.S(26);
-            Theme.SweepRule(g, Theme.S(Pad), right, y + Theme.S(4), Theme.Line,
-                            _danger ? Theme.SignalAlert : Theme.Green, 8.0, 0.2);
+            Theme.SweepRule(g, Theme.S(Pad), right, y + Theme.S(4), Theme.Line, Theme.SignalAlert, 8.0, 0.2);
             y += Theme.S(10);
 
             if (_messageH > 0)
@@ -281,7 +261,6 @@ namespace DshLauncher
                 y += Theme.S(_messageH) + Theme.S(18);
             }
 
-            // 字段块：等宽标签 + 等宽值（单行省略号）
             if (_fields != null)
             {
                 int fy = _fieldsTop;
@@ -298,7 +277,7 @@ namespace DshLauncher
                             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
                     }
                     fy += Theme.S(24);
-                    y += Theme.S(24);              // 游标同步跳过字段块，警告行才不会压在字段上
+                    y += Theme.S(24);
                 }
                 y += Theme.S(6);
             }
@@ -309,6 +288,14 @@ namespace DshLauncher
                     new Rectangle(Theme.S(Pad), y + Theme.S(6), right - Theme.S(Pad), Theme.S(_warningH)), Theme.SignalAlert,
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
             }
+
+            // 「请输入 <确认词>」提示行
+            int hintY = Theme.S(_inputY) - Theme.S(22);
+            Theme.DrawTracked(g, "请输入", Theme.FontMonoSmall, Theme.S(Pad), hintY + Theme.S(4), Theme.Sub, Theme.SF(1.2f));
+            TextRenderer.DrawText(g, _want, Theme.FontMono,
+                new Rectangle(Theme.S(Pad + 58), hintY, right - Theme.S(Pad + 58), Theme.S(20)),
+                Matches() ? Theme.Green : Theme.Amber,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
             base.OnPaint(e);
         }

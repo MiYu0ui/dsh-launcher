@@ -48,6 +48,7 @@ namespace DshLauncher
         private bool _deployCheckStarted;
         private bool _deployModeEntered;
         private bool _deployStarting;
+        private bool _installAskedThisRun;
 
         public event EventHandler<LogEventArgs> LogProduced;
 
@@ -112,6 +113,8 @@ namespace DshLauncher
             AddLog("DSH 启动器 v" + Version + " 已就绪（构建于 " + BuildInfo.BuildStamp + "）。", LogLevel.Dim);
             AddLog("工作目录：" + Config.Workspace, LogLevel.Dim);
             AddLog("配置：" + AppConfig.ConfigPath, LogLevel.Dim);
+            AddLog("安装位置：" + (Config.IsPortable ? "绿色免安装（就地运行）" : Config.InstallDir), LogLevel.Dim);
+            ReconcileShortcuts();
 
             // 版本检测：失败的更新候选也记一笔，便于排查
             _update = UpdateCheck.Check();
@@ -136,12 +139,111 @@ namespace DshLauncher
                 {
                     ShowForm();
                     if (args.Settings && _form != null && !_form.IsDisposed) OpenSettings(_form);
+                    ScheduleInstallPrompt();
                 }
             }
 
             // 启动后检测一次端口状态，便于界面如实显示
             if (!args.AutoStart) DetectExternal();
             if (!args.AutoStart) StartDeploymentCheck();
+        }
+
+        // ---------------- 安装位置 ----------------
+        /// <summary>
+        /// 配置与磁盘的一致性核对（只报告，不拦截启动）：
+        /// 自启项按配置对齐；失效的快捷方式提前暴露出来，别等下次才发现"安装目录没了"。
+        /// </summary>
+        private void ReconcileShortcuts()
+        {
+            try
+            {
+                string action = Shortcuts.ReconcileAutoStart(Config.AutoStart, AppPaths.ExePath, AppPaths.InstallDir);
+                if (!string.IsNullOrEmpty(action)) AddLog(action, LogLevel.Warn);
+
+                string legacy = Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
+                if (!string.IsNullOrEmpty(legacy)) AddLog(legacy, LogLevel.Dim);
+
+                // 上一次迁移安装位置留下的旧副本，由本实例（新位置）清理
+                string cleaned = InstallLocation.CleanupPreviousInstall(Config);
+                if (!string.IsNullOrEmpty(cleaned)) AddLog(cleaned, LogLevel.Dim);
+
+                foreach (string p in Config.ConsistencyProblems()) AddLog(p, LogLevel.Warn);
+            }
+            catch { }
+        }
+
+        /// <summary>把「首次选择安装位置」排到消息循环启动之后（构造期不能直接弹模态框）。</summary>
+        private void ScheduleInstallPrompt()
+        {
+            if (Config.InstallAsked || _installAskedThisRun) return;
+            if (_form == null || _form.IsDisposed) return;
+            try { _form.BeginInvoke(new MethodInvoker(MaybeAskInstallLocation)); }
+            catch { }
+        }
+
+        /// <summary>
+        /// 第一次运行由**用户**选择安装位置，绝不静默采用默认值。
+        /// 用 ✕/Esc 关掉视为"还没决定"，下次启动接着问。
+        /// </summary>
+        public void MaybeAskInstallLocation()
+        {
+            if (_exiting || _installAskedThisRun || Config.InstallAsked) return;
+            if (_ui != null && _ui.InvokeRequired)
+            {
+                try { _ui.BeginInvoke(new MethodInvoker(MaybeAskInstallLocation)); }
+                catch { }
+                return;
+            }
+            _installAskedThisRun = true;
+
+            ConfirmDialog.Choice c = InstallLocation.Ask(DlgOwner);
+            if (c == ConfirmDialog.Choice.Cancel) return;          // 没决定，下次再问
+
+            if (c == ConfirmDialog.Choice.Alt)                     // 绿色免安装
+            {
+                InstallLocation.MarkPortable(Config);
+                AddLog("安装位置：绿色免安装（就地运行）—— " + AppPaths.InstallDir, LogLevel.Good);
+                return;
+            }
+
+            string target = c == ConfirmDialog.Choice.Confirm
+                ? AppConfig.SuggestedInstallDir()
+                : InstallLocation.PickFolder(DlgOwner, AppPaths.InstallDir);
+            if (string.IsNullOrEmpty(target)) return;
+            ApplyInstallLocation(DlgOwner, target);
+        }
+
+        /// <summary>
+        /// 落实安装位置。target 为空串 = 绿色免安装。
+        /// 需要换目录时会复制程序本体、重建快捷方式，再以新位置重启启动器（DSH 服务不受影响）。
+        /// </summary>
+        public void ApplyInstallLocation(IWin32Window owner, string target)
+        {
+            if (target != null && target.Length == 0)
+            {
+                InstallLocation.MarkPortable(Config);
+                AddLog("安装位置：绿色免安装（就地运行）—— " + AppPaths.InstallDir, LogLevel.Good);
+                return;
+            }
+
+            string error;
+            bool restarting;
+            error = InstallLocation.Apply(Config, target, out restarting);
+            if (error != null)
+            {
+                AddLog("设置安装位置失败：" + error, LogLevel.Bad);
+                ConfirmDialog.Info(owner, "INSTALL / 失败", "无法安置到该位置", error,
+                    new string[] { "目标=" + target },
+                    "换一个你有写入权限的目录；Program Files 之类的系统目录需要管理员权限。");
+                return;
+            }
+
+            AddLog("安装位置：" + Config.InstallDir, LogLevel.Good);
+            if (restarting)
+            {
+                AddLog("正在以新位置重启启动器…（DSH 服务不受影响）", LogLevel.Good);
+                Shutdown(false);
+            }
         }
 
         // ---------------- 部署检测与自动部署 ----------------
@@ -270,6 +372,7 @@ namespace DshLauncher
                 _settingsAfterReveal = false;
                 OpenSettings(_form);
             }
+            ScheduleInstallPrompt();
             StartDeploymentCheck();
         }
 
@@ -369,7 +472,7 @@ namespace DshLauncher
                 string path = FileLog.Path;
                 System.Diagnostics.ProcessStartInfo psi = System.IO.File.Exists(path)
                     ? new System.Diagnostics.ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"")
-                    : new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + AppPaths.InstallDir + "\"");
+                    : new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + AppPaths.LogsDir + "\"");
                 psi.UseShellExecute = true;
                 System.Diagnostics.Process.Start(psi);
             }
@@ -418,6 +521,8 @@ namespace DshLauncher
             menu.Items.Add(MenuItem("停止服务", delegate(object s, EventArgs e) { StopServer(true); }));
             menu.Items.Add(MenuItem("重启服务（强制）", delegate(object s, EventArgs e) { ForceStopExternal(true); }));
             menu.Items.Add(MenuItem("清扫残留 DSH 进程", delegate(object s, EventArgs e) { CleanupResiduals(); }));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(MenuItem("卸载…", delegate(object s, EventArgs e) { OpenUninstall(DlgOwner); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(MenuItem("退出启动器", delegate(object s, EventArgs e) { ExitApp(); }));
             _tray.ContextMenuStrip = menu;
@@ -797,15 +902,47 @@ namespace DshLauncher
 
         public void OpenSettings(IWin32Window owner)
         {
+            string pending = null;
+            bool uninstall = false;
             using (SettingsForm dlg = new SettingsForm(Config, Server))
             {
-                if (dlg.ShowDialog(owner) == DialogResult.OK)
+                DialogResult r = dlg.ShowDialog(owner);
+                if (r == DialogResult.OK)
                 {
                     Config.Save();
                     AddLog("设置已保存。", LogLevel.Good);
                     if (Server.Status == ServerStatus.Running || Server.Status == ServerStatus.Starting)
                         AddLog("（端口/工作目录的改动会在下次启动服务时生效）", LogLevel.Dim);
+                    pending = dlg.PendingInstallDir;
                 }
+                else if (r == DialogResult.Abort) uninstall = true;   // 点了「卸载…」
+            }
+            if (uninstall) { OpenUninstall(owner); return; }
+            // 搬迁必须在设置窗关闭之后执行：重启启动器时不能还压着一个模态窗
+            if (pending != null) ApplyInstallLocation(owner, pending);
+        }
+
+        /// <summary>打开卸载二级界面；如果这次把启动器自己也卸了，收尾退出。</summary>
+        public void OpenUninstall(IWin32Window owner)
+        {
+            bool removed = false;
+            try
+            {
+                using (UninstallForm dlg = new UninstallForm(Config, Server))
+                {
+                    dlg.ShowDialog(owner);
+                    removed = dlg.LauncherRemoved;
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog("打开卸载界面失败：" + ex.Message, LogLevel.Bad);
+                return;
+            }
+            if (removed)
+            {
+                AddLog("启动器本体已被卸载，正在退出…", LogLevel.Warn);
+                Shutdown(false);      // 服务是否停止已由卸载界面按选项处理
             }
         }
 

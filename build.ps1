@@ -9,7 +9,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\DSH Launcher'),
+    [string]$InstallDir = '',        # 留空 = 交互式询问（不再静默采用默认值）
     [switch]$Icons,
     [switch]$NoShortcuts,
     [switch]$BuildOnly,      # 只编译到 build\，不安装（用于验证"发现新版本"）
@@ -22,6 +22,19 @@ $srcDir = Join-Path $root 'src'
 $assets = Join-Path $root 'assets'
 $buildDir = Join-Path $root 'build'
 $exeName = 'DSH Launcher.exe'
+
+# 安装位置不再静默取默认值：没显式给 -InstallDir 就在这里问一次。
+# -BuildOnly 只编译不安装，不需要问。
+if (-not $BuildOnly -and [string]::IsNullOrWhiteSpace($InstallDir)) {
+    $suggested = Join-Path $env:LOCALAPPDATA 'Programs\DSH Launcher'
+    Write-Host ''
+    Write-Host '选择安装位置' -ForegroundColor Magenta
+    Write-Host "  直接回车 = 建议位置：$suggested" -ForegroundColor Gray
+    Write-Host '  也可输入任意目录，例如 D:\Apps\DSH Launcher' -ForegroundColor Gray
+    $answer = Read-Host '安装位置'
+    $InstallDir = if ([string]::IsNullOrWhiteSpace($answer)) { $suggested } else { $answer.Trim().Trim('"') }
+    Write-Host "  -> $InstallDir" -ForegroundColor Green
+}
 
 function Step($text) { Write-Host "==> $text" -ForegroundColor Magenta }
 function Ok($text)   { Write-Host "    $text" -ForegroundColor Green }
@@ -127,7 +140,7 @@ if ($LASTEXITCODE -ne 0) { throw "编译失败（退出码 $LASTEXITCODE）" }
 Ok ("{0:N0} KB" -f ((Get-Item $outExe).Length / 1KB))
 
 # ---------------------------------------------------------------- 安装
-$installedExe = Join-Path $InstallDir $exeName
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $installedExe = '' } else { $installedExe = Join-Path $InstallDir $exeName }
 if ($BuildOnly) {
     Step '仅编译模式：跳过安装与快捷方式'
     Ok $outExe
@@ -141,6 +154,24 @@ Get-Process -Name 'DSH Launcher' -ErrorAction SilentlyContinue | ForEach-Object 
 Start-Sleep -Milliseconds 400
 Copy-Item $outExe (Join-Path $InstallDir $exeName) -Force
 Ok $installedExe
+
+# 把安装位置写进配置，首次运行的选择框就不会再弹（按键就地合并，不动其它设置）
+$cfgPath = Join-Path $env:APPDATA 'DSH Launcher\config.ini'
+$cfgDir = Split-Path $cfgPath -Parent
+if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+$lines = New-Object 'System.Collections.Generic.List[string]'
+if (Test-Path $cfgPath) { foreach ($l in (Get-Content $cfgPath -Encoding UTF8)) { $lines.Add($l) } }
+
+function Set-IniKey($list, $key, $value) {
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        if ($list[$i] -match ('^\s*' + [regex]::Escape($key) + '\s*=')) { $list[$i] = "$key=$value"; return }
+    }
+    $list.Add("$key=$value")
+}
+Set-IniKey $lines 'installdir' $InstallDir
+Set-IniKey $lines 'installasked' '1'
+[IO.File]::WriteAllLines($cfgPath, $lines, (New-Object Text.UTF8Encoding($false)))
+Ok "安装位置已写入配置：$cfgPath"
 }
 
 # ---------------------------------------------------------------- 快捷方式
@@ -168,10 +199,10 @@ if (-not $NoShortcuts -and -not $BuildOnly) {
     if (Test-Path $deadFolder) {
         $deadTarget = $shell.CreateShortcut((Join-Path $deadFolder 'DSH Launcher.lnk')).TargetPath
         if (-not (Test-Path $deadTarget)) {
-            $backup = Join-Path $InstallDir 'backup'
+            $backup = Join-Path $env:LOCALAPPDATA 'DSH Launcher\backup'
             if (-not (Test-Path $backup)) { New-Item -ItemType Directory -Path $backup | Out-Null }
             Move-Item $deadFolder (Join-Path $backup ("DSH Launcher 死快捷方式-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))) -Force
-            Warn '已移除开始菜单里失效的旧「DSH Launcher」文件夹（已备份到安装目录 backup\）'
+            Warn '已移除开始菜单里失效的旧「DSH Launcher」文件夹（已备份到 %LOCALAPPDATA%\DSH Launcher\backup）'
         }
     }
 
@@ -183,14 +214,30 @@ if (-not $NoShortcuts -and -not $BuildOnly) {
     }
     New-Lnk (Join-Path ([Environment]::GetFolderPath('Startup')) 'DSH 启动器（后台自启）.lnk') $installedExe '--autostart' $InstallDir 'DeepSeek Harness 开机静默启动'
     Ok '开机自启已切换到本启动器（如需关闭：右键托盘图标 → 退出，再到设置里取消勾选）'
+
+    # 装完自校验：三个快捷方式的目标必须真的存在
+    #（这正是"安装目录被删 → 快捷方式全指向空气"那个坑，装的时候就要发现）
+    Step '校验快捷方式'
+    $bad = 0
+    foreach ($lnkPath in @(
+            (Join-Path ([Environment]::GetFolderPath('Desktop')) 'DSH 启动器.lnk'),
+            (Join-Path ([Environment]::GetFolderPath('Programs')) 'DSH 启动器.lnk'),
+            (Join-Path ([Environment]::GetFolderPath('Startup')) 'DSH 启动器（后台自启）.lnk'))) {
+        if (-not (Test-Path $lnkPath)) { Warn "缺失：$lnkPath"; $bad++; continue }
+        $target = $shell.CreateShortcut($lnkPath).TargetPath
+        if (Test-Path $target) { Ok "OK   $lnkPath" } else { Warn "目标不存在：$lnkPath -> $target"; $bad++ }
+    }
+    if ($bad -gt 0) { throw "有 $bad 个快捷方式没有指向真实文件，安装不完整。" }
 }
 
 # ---------------------------------------------------------------- 自检
 if ($SelfTest) {
     Step '运行无黑窗自检'
     $report = Join-Path $buildDir 'selftest-report.txt'
+    # -BuildOnly 时程序只编译到 build\，就从那里跑自检
+    $selftestExe = if ($installedExe -and (Test-Path $installedExe)) { $installedExe } else { $outExe }
     # 注意：GUI 子系统程序要用 Start-Process -Wait 才会等它跑完并拿到退出码
-    $proc = Start-Process -FilePath $installedExe -ArgumentList @('--selftest', $report) -PassThru -Wait
+    $proc = Start-Process -FilePath $selftestExe -ArgumentList @('--selftest', $report) -PassThru -Wait
     if (Test-Path $report) { Get-Content $report | ForEach-Object { Write-Host "    $_" } }
     if ($proc.ExitCode -ne 0) { throw "自检未通过（退出码 $($proc.ExitCode)）" }
     Ok '自检通过：全程无黑色命令行窗口'
@@ -198,6 +245,6 @@ if ($SelfTest) {
 
 Write-Host ''
 Write-Host '完成。' -ForegroundColor Magenta
-Write-Host "  程序：$installedExe" -ForegroundColor Gray
+if ($installedExe) { Write-Host "  程序：$installedExe" -ForegroundColor Gray } else { Write-Host "  程序：$outExe（仅编译，未安装）" -ForegroundColor Gray }
 Write-Host "  配置：$env:APPDATA\DSH Launcher\config.ini" -ForegroundColor Gray
-Write-Host "  日志：$InstallDir\logs\" -ForegroundColor Gray
+Write-Host "  日志：$env:LOCALAPPDATA\DSH Launcher\logs\" -ForegroundColor Gray
