@@ -63,6 +63,31 @@ namespace DshLauncher
 
             Layout(confirmText);
             Anim.Track(this, 1);
+            _reveal = new WindowReveal(this, WindowReveal.Level, true);   // 对话框不做章节导轨，只有括号 + 标签块 + 标题擦入
+        }
+
+        private readonly WindowReveal _reveal;
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (_reveal != null) _reveal.BeginEnter();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (_reveal != null && _reveal.InterceptClose(e)) return;      // 先播 200ms 退场再真关
+            base.OnFormClosing(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Anim.Untrack(this);
+                if (_reveal != null) _reveal.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         protected override CreateParams CreateParams
@@ -73,12 +98,6 @@ namespace DshLauncher
                 cp.ClassStyle |= 0x00020000;   // CS_DROPSHADOW
                 return cp;
             }
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) Anim.Untrack(this);
-            base.Dispose(disposing);
         }
 
         // ---------------- 静态入口 ----------------
@@ -218,6 +237,9 @@ namespace DshLauncher
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // 入场没播完时只是把动画跳完，**不吞按键** —— 吞掉会让 Esc/Enter 在头 300ms 内像失灵；
+            // 而模态框一旦"关不掉"就是挂死（实测踩过：误用大窗 600ms 时间轴时直接收不了场）。
+            if (_reveal != null && _reveal.Busy) _reveal.Skip();
             if (keyData == Keys.Escape)
             {
                 _result = Choice.Cancel;
@@ -238,6 +260,7 @@ namespace DshLauncher
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return; }   // 点一下跳过动画（不改变任何选择）
             if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
@@ -257,15 +280,18 @@ namespace DshLauncher
             Theme.Rule(g, 0, Theme.S(HeaderH) - 1, w, Theme.Line);
             Theme.DrawLiveFrame(g, new Rectangle(0, 0, w - 1, h - 1), Theme.Line,
                                 _danger ? Theme.SignalAlert : Theme.Green, false, 6.2, 0.4);
-            Theme.CornerTicks(g, new Rectangle(Theme.S(9), Theme.S(9), w - Theme.S(19), h - Theme.S(19)), Theme.Line, Theme.S(11));
 
-            // 顶部标注
-            Theme.DrawTracked(g, _track, Theme.FontMonoSmall, Theme.S(Pad), band + Theme.S(14), Theme.Sub, Theme.SF(1.6f));
+            // 顶部标注：标签块（chip）+ 标题擦入。对话框不做章节导轨 —— 它没有"章节"。
+            double chipP = _reveal != null ? _reveal.ChipP : 1.0;
+            double titleP = _reveal != null ? _reveal.TitleP : 1.0;
+            UiPaint.Chip(g, Theme.S(Pad), band + Theme.S(11), _track, chipP);
 
             int y = Theme.S(HeaderH) + Theme.S(16);
+            // 标题：**底色→目标色插值淡入**，不用 SetClip 擦入 —— GDI 文字不认 GDI+ 裁剪区，
+            // SetClip 对它无效（表现出来就是"整行提前出现"）。
             TextRenderer.DrawText(g, _headline, Theme.FontStatus,
                 new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(26)),
-                _danger ? Theme.SignalAlert : Theme.Ink,
+                Theme.Mix(Theme.Bg, _danger ? Theme.SignalAlert : Theme.Ink, titleP),
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             y += Theme.S(26);
             Theme.SweepRule(g, Theme.S(Pad), right, y + Theme.S(4), Theme.Line,
@@ -276,7 +302,8 @@ namespace DshLauncher
             {
                 y += Theme.S(12);
                 TextRenderer.DrawText(g, _message, Theme.FontUi,
-                    new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(_messageH)), Theme.InkSoft,
+                    new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(_messageH)),
+                    Theme.Mix(Theme.Bg, Theme.InkSoft, 1.0),
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
                 y += Theme.S(_messageH) + Theme.S(18);
             }
@@ -290,11 +317,13 @@ namespace DshLauncher
                     string label = raw, value = "";
                     int eq = raw.IndexOf('=');
                     if (eq > 0) { label = raw.Substring(0, eq); value = raw.Substring(eq + 1); }
-                    Theme.DrawTracked(g, label, Theme.FontMonoSmall, Theme.S(Pad), fy + Theme.S(4), Theme.Sub, Theme.SF(1.2f));
+                    Theme.DrawTracked(g, label, Theme.FontMonoSmall, Theme.S(Pad), fy + Theme.S(4),
+                                      Theme.Sub, Theme.SF(1.2f));
                     if (value.Length > 0)
                     {
                         TextRenderer.DrawText(g, value, Theme.FontMono,
-                            new Rectangle(Theme.S(Pad + 92), fy, right - Theme.S(Pad + 92), Theme.S(22)), Theme.Ink,
+                            new Rectangle(Theme.S(Pad + 92), fy, right - Theme.S(Pad + 92), Theme.S(22)),
+                            Theme.Ink,
                             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
                     }
                     fy += Theme.S(24);
@@ -306,9 +335,15 @@ namespace DshLauncher
             if (_warningH > 0)
             {
                 TextRenderer.DrawText(g, _warning, Theme.FontUiBold,
-                    new Rectangle(Theme.S(Pad), y + Theme.S(6), right - Theme.S(Pad), Theme.S(_warningH)), Theme.SignalAlert,
+                    new Rectangle(Theme.S(Pad), y + Theme.S(6), right - Theme.S(Pad), Theme.S(_warningH)),
+                    Theme.SignalAlert,
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
             }
+
+            // 四角括号（模板里的 ⌐ 元素）：框住整张卡片，比整圈描边轻
+            if (_reveal != null && _reveal.WantsLayout)
+                UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)),
+                                 _danger ? Theme.SignalAlert : Theme.Ink, _reveal.BracketPhases());
 
             base.OnPaint(e);
         }

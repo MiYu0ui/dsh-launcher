@@ -31,10 +31,10 @@ namespace DshLauncher
         }
     }
 
-    /// <summary>无边框窗口右上角的自绘按钮（最小化 / 关闭 / 齿轮设置），细线字形。</summary>
+    /// <summary>无边框窗口右上角的自绘按钮（最小化 / 关闭 / 齿轮设置 / 问号帮助），细线字形。</summary>
     internal class ChromeButton : Control
     {
-        public enum GlyphKind { Minimize, Close, Gear }
+        public enum GlyphKind { Minimize, Close, Gear, Help }
 
         private readonly GlyphKind _kind;
         private bool _hover;
@@ -73,6 +73,7 @@ namespace DshLauncher
 
             bool close = _kind == GlyphKind.Close;
             bool isGear = _kind == GlyphKind.Gear;
+            bool isHelp = _kind == GlyphKind.Help;
             Color glyph = Theme.InkSoft;
             if (_hover)
             {
@@ -89,6 +90,11 @@ namespace DshLauncher
                 DrawGear(g, cx, cy, glyph);
                 return;
             }
+            if (isHelp)
+            {
+                DrawQuestion(g, cx, cy, glyph);
+                return;
+            }
             using (Pen p = new Pen(glyph, Math.Max(1f, Theme.SF(1.2f))))
             {
                 if (_kind == GlyphKind.Minimize)
@@ -101,6 +107,33 @@ namespace DshLauncher
                     g.DrawLine(p, cx + half, cy - half, cx - half, cy + half);
                 }
             }
+        }
+
+        /// <summary>
+        /// 问号：纯 stroke，与齿轮同一套细线语言（上半弧 + 竖钩 + 圆点）。
+        /// 上半弧用一个开口朝下的椭圆弧，竖钩从弧尾收到中心，最后点一个圆头短竖当点。
+        /// </summary>
+        private void DrawQuestion(Graphics g, int cx, int cy, Color c)
+        {
+            SmoothingMode saved = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            try
+            {
+                float r = Theme.SF(3.6f);          // 上半弧半径
+                float top = cy - Theme.SF(3.4f);   // 弧心
+                using (Pen p = new Pen(c, Math.Max(1f, Theme.SF(1.15f))))
+                {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
+                    // 弧：从左下起、逆时针划过顶部到右下（留出下方开口）
+                    g.DrawArc(p, cx - r, top - r, r * 2f, r * 2f, 200f, 230f);
+                    // 竖钩：从弧的右下端收到中心线
+                    g.DrawLine(p, cx + r * 0.72f, top + r * 0.72f, cx, top + r * 1.85f);
+                    // 点：圆头短竖 = 圆点
+                    g.DrawLine(p, cx, cy + Theme.SF(3.6f), cx, cy + Theme.SF(4.4f));
+                }
+            }
+            finally { g.SmoothingMode = saved; }
         }
 
         /// <summary>

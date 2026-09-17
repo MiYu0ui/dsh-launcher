@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -67,7 +67,9 @@ namespace DshLauncher
                 return 0;
             }
 
-            UpdateCheck.CleanupLeftovers();   // 清掉上一轮更新留下的 .old
+            // ⚠️ 这里**不能**清 .old：新版本才刚进 Main，还没证明自己能起来。
+            // 清理挪到主窗口真正显示出来之后（LauncherContext.RevealMainForm）——
+            // 否则新版本自身有 bug 时，唯一的回退副本会被当场删掉，用户再也退不回去。
             FileLog.Write("=== 启动器启动 v" + BuildInfo.Version + " args=[" + string.Join(" ", argv) + "] dpi=" + scale.ToString("0.00") + " ===");
 
             try

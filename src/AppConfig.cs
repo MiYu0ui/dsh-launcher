@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -30,6 +30,12 @@ namespace DshLauncher
         /// pinned = 固定 PinnedVersion + PinnedIntegrity（可复现）。
         /// </summary>
         public string VersionMode = "latest";
+
+        /// <summary>
+        /// 二级界面的过渡动画档位：full（默认，含盖板解密）/ brief（只留整窗淡入）/ off（瞬时）。
+        /// 取值与解析见 UiMotion.ParseLevel —— 关闭档等价于原库的 reduced-motion 硬分支。
+        /// </summary>
+        public string Motion = "full";
 
         /// <summary>
         /// 迁移安装位置后要清理的旧目录。由**新实例**在下次启动时删除本体的旧副本
@@ -116,6 +122,7 @@ namespace DshLauncher
                         case "installdir": cfg.InstallDir = val; break;
                         case "installasked": cfg.InstallAsked = ParseBool(val, cfg.InstallAsked); break;
                         case "versionmode": cfg.VersionMode = val.ToLowerInvariant() == "pinned" ? "pinned" : "latest"; break;
+                        case "motion": cfg.Motion = UiMotion.LevelKey(UiMotion.ParseLevel(val)); break;
                         case "cleanupdir": cfg.CleanupDir = val; break;
                     }
                 }
@@ -124,7 +131,11 @@ namespace DshLauncher
             return cfg;
         }
 
-        public void Save()
+        /// <summary>
+        /// 写盘。**返回是否真的写成功** —— 以前是 void + 裸 catch，于是配置写失败时
+        /// 调用方照样打「设置已保存」，用户关掉设置窗、下次启动却读回旧值（设置凭空消失）。
+        /// </summary>
+        public bool Save()
         {
             try
             {
@@ -136,6 +147,7 @@ namespace DshLauncher
                 sb.AppendLine("# installdir  启动器安装位置；留空 = 绿色免安装（就地运行）");
                 sb.AppendLine("# installasked 是否已经问过用户安装位置（0 = 下次运行会弹选择框）");
                 sb.AppendLine("# versionmode latest = 自动解析官方最新可安装版（推荐）；pinned = 固定用 pinnedversion");
+                sb.AppendLine("# motion      二级界面过渡动画：full = 完整（含盖板解密，默认）；brief = 只留整窗淡入；off = 关闭");
                 sb.AppendLine("# cleanupdir  迁移安装位置后待清理的旧目录（由新实例自动清空，一般不用手改）");
                 sb.AppendLine("workspace=" + Workspace);
                 sb.AppendLine("port=" + Port.ToString(CultureInfo.InvariantCulture));
@@ -155,10 +167,21 @@ namespace DshLauncher
                 sb.AppendLine("installdir=" + InstallDir);
                 sb.AppendLine("installasked=" + (InstallAsked ? "1" : "0"));
                 sb.AppendLine("versionmode=" + VersionMode);
+                sb.AppendLine("motion=" + UiMotion.LevelKey(UiMotion.ParseLevel(Motion)));
                 sb.AppendLine("cleanupdir=" + CleanupDir);
-                File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
+                // 原子写：先写同目录临时文件，再整体替换 —— 直接 WriteAllText 在磁盘满/被中断时
+                // 会留下**截断的 config.ini**，而 Load() 的 catch 会静默退回默认值（用户设置全没）。
+                string tmp = ConfigPath + ".tmp";
+                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
+                if (File.Exists(ConfigPath)) File.Replace(tmp, ConfigPath, null);
+                else File.Move(tmp, ConfigPath);
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                FileLog.Write("[Warn] 配置写入失败：" + ex.Message + "（路径 " + ConfigPath + "）");
+                return false;
+            }
         }
 
         private static int ParseInt(string s, int fallback)

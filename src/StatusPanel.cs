@@ -63,12 +63,14 @@ namespace DshLauncher
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.PathEllipsis);
                 return;
             }
-            System.Drawing.Drawing2D.GraphicsState st = g.Save();
-            g.SetClip(new Rectangle(rect.X, rect.Y, Math.Max(1, (int)(rect.Width * k)), rect.Height));
-            TextRenderer.DrawText(g, text, font, rect, color,
+            // ⚠️ 原来是 SetClip + TextRenderer，但 **GDI 文字不认 GDI+ 的裁剪区** ——
+            //    扫入根本裁不住，文字会整行提前出现。改成按宽度截字：共享 Theme.ClipTracked
+            //    （与 DrawTracked 的擦入、帮助列表的标题截断是同一套逐字测量逻辑）。
+            int maxW = Math.Max(1, (int)(rect.Width * k));
+            string shown = Theme.ClipTracked(g, text, font, 0f, maxW);
+            TextRenderer.DrawText(g, shown, font, rect, color,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.PathEllipsis);
-            g.Restore(st);
-            int cx = rect.X + (int)(rect.Width * k);
+            int cx = rect.X + maxW;
             using (Pen p = new Pen(Color.FromArgb(150, color), 1.6f))
                 g.DrawLine(p, cx, rect.Y + 2, cx, rect.Bottom - 2);
         }

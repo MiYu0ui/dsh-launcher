@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Management;
@@ -124,14 +124,27 @@ namespace DshLauncher
         }
 
         /// <summary>命令行是否像 DSH 服务（判定用，宁可放过不可错杀）。</summary>
+        /// <summary>
+        /// 命令行是否像 DSH 服务（判定用，宁可放过不可错杀）。
+        ///
+        /// ⚠️ 早先是"同时含子串 dsh 和 web"—— 任何路径里带 dsh 的 node/web 工具都会被命中，
+        /// 再配合"一次确认全杀"就会误杀用户其它 node 进程。现在改成**锚定**：要么是
+        /// @deepseek-ai/dsh 的包路径，要么是 `dsh web` 这种把 dsh 当命令名调用的形态。
+        /// </summary>
         public static bool IsDshCommandLine(string cmd)
         {
             if (string.IsNullOrEmpty(cmd)) return false;
             string c = cmd.ToLowerInvariant();
+
+            // ① 包路径（正反斜杠两种写法都算）
             if (c.IndexOf("@deepseek-ai/dsh", StringComparison.Ordinal) >= 0) return true;
-            // cmd /d /s /c dsh web --port 3080
-            if (c.IndexOf("dsh", StringComparison.Ordinal) >= 0 && c.IndexOf("web", StringComparison.Ordinal) >= 0) return true;
-            return false;
+            if (c.IndexOf("@deepseek-ai\\dsh", StringComparison.Ordinal) >= 0) return true;
+            // ② dsh 的入口脚本
+            if (c.IndexOf("\\dsh\\lib\\bin.js", StringComparison.Ordinal) >= 0) return true;
+            if (c.IndexOf("/dsh/lib/bin.js", StringComparison.Ordinal) >= 0) return true;
+            // ③ 把 dsh 当命令名调用：dsh web / dsh.cmd" web / \dsh web（web 必须是独立参数）
+            return System.Text.RegularExpressions.Regex.IsMatch(
+                c, "(^|[\\s\"'\\\\(/])dsh(\\.(cmd|exe|ps1))?[\"']?\\s+web(\\s|$)");
         }
 
         /// <summary>往上找同族树根：父进程必须也是 DSH 族且是壳层进程，遇到终端/系统进程立即停。</summary>

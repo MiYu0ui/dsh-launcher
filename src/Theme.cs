@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -24,6 +24,7 @@ namespace DshLauncher
 
         // ---- 亮面（主界面） ----
         public static readonly Color Bg = Color.FromArgb(0xEA, 0xE5, 0xE1);      // 统一背景
+
         public static readonly Color BgShade = Color.FromArgb(0xDF, 0xD9, 0xD3);
         public static readonly Color Panel = Color.FromArgb(0xF5, 0xF2, 0xEF);
         public static readonly Color PanelHi = Color.FromArgb(0xFC, 0xFA, 0xF8);
@@ -39,11 +40,11 @@ namespace DshLauncher
         // 与暖灰白 / 暖杏金同属低饱和体系，避免跳色：偏冷的深松绿 + 柔和版
         public static readonly Color Green = Color.FromArgb(0x2E, 0x7D, 0x5B);
         public static readonly Color GreenSoft = Color.FromArgb(0x6C, 0xB0, 0x8F);
-        public static readonly Color GreenMist = Color.FromArgb(0xDD, 0xEA, 0xE2);
+
 
         // ---- 暗面（环形加载器所在的"屏幕"） ----
         public static readonly Color Dark = Color.FromArgb(0x11, 0x18, 0x1B);
-        public static readonly Color DarkPanel = Color.FromArgb(0x26, 0x31, 0x36);
+
         public static readonly Color DarkLine = Color.FromArgb(0x53, 0x61, 0x66);
         public static readonly Color DarkText = Color.FromArgb(0xE0, 0xE3, 0xDC);
         public static readonly Color DarkSub = Color.FromArgb(0xA6, 0xB0, 0xB1);
@@ -105,15 +106,23 @@ namespace DshLauncher
         }
 
         // 字号用 pt 会随 DPI 自动放大；只有像素几何需要乘 Scale
-        public static Font FontUi { get { return new Font(Cjk, 9.75f, FontStyle.Regular, GraphicsUnit.Point); } }
-        public static Font FontUiBold { get { return new Font(Cjk, 9.75f, FontStyle.Bold, GraphicsUnit.Point); } }
-        public static Font FontSmall { get { return new Font(Cjk, 8.25f, FontStyle.Regular, GraphicsUnit.Point); } }
-        public static Font FontStatus { get { return new Font(Cjk, 15f, FontStyle.Bold, GraphicsUnit.Point); } }
-        public static Font FontWord { get { return new Font(Tech, 19f, FontStyle.Bold, GraphicsUnit.Point); } }
-        public static Font FontTech { get { return new Font(Tech, 10f, FontStyle.Regular, GraphicsUnit.Point); } }
-        public static Font FontTechBold { get { return new Font(Tech, 10f, FontStyle.Bold, GraphicsUnit.Point); } }
-        public static Font FontMono { get { return new Font(Mono, 9f, FontStyle.Regular, GraphicsUnit.Point); } }
-        public static Font FontMonoSmall { get { return new Font(Mono, 8.25f, FontStyle.Regular, GraphicsUnit.Point); } }
+        private static Font _cachedFontUi;
+        public static Font FontUi { get { if (_cachedFontUi == null) _cachedFontUi = new Font(Cjk, 9.75f, FontStyle.Regular, GraphicsUnit.Point); return _cachedFontUi; } }
+        private static Font _cachedFontUiBold;
+        public static Font FontUiBold { get { if (_cachedFontUiBold == null) _cachedFontUiBold = new Font(Cjk, 9.75f, FontStyle.Bold, GraphicsUnit.Point); return _cachedFontUiBold; } }
+        private static Font _cachedFontSmall;
+        public static Font FontSmall { get { if (_cachedFontSmall == null) _cachedFontSmall = new Font(Cjk, 8.25f, FontStyle.Regular, GraphicsUnit.Point); return _cachedFontSmall; } }
+        private static Font _cachedFontStatus;
+        public static Font FontStatus { get { if (_cachedFontStatus == null) _cachedFontStatus = new Font(Cjk, 15f, FontStyle.Bold, GraphicsUnit.Point); return _cachedFontStatus; } }
+        private static Font _cachedFontWord;
+        public static Font FontWord { get { if (_cachedFontWord == null) _cachedFontWord = new Font(Tech, 19f, FontStyle.Bold, GraphicsUnit.Point); return _cachedFontWord; } }
+
+        private static Font _cachedFontTechBold;
+        public static Font FontTechBold { get { if (_cachedFontTechBold == null) _cachedFontTechBold = new Font(Tech, 10f, FontStyle.Bold, GraphicsUnit.Point); return _cachedFontTechBold; } }
+        private static Font _cachedFontMono;
+        public static Font FontMono { get { if (_cachedFontMono == null) _cachedFontMono = new Font(Mono, 9f, FontStyle.Regular, GraphicsUnit.Point); return _cachedFontMono; } }
+        private static Font _cachedFontMonoSmall;
+        public static Font FontMonoSmall { get { if (_cachedFontMonoSmall == null) _cachedFontMonoSmall = new Font(Mono, 8.25f, FontStyle.Regular, GraphicsUnit.Point); return _cachedFontMonoSmall; } }
 
         // ---- 绘制工具 ----
         public static void Fill(Graphics g, Rectangle r, Color c)
@@ -160,6 +169,19 @@ namespace DshLauncher
         }
 
         public static int Lerp(int a, int b, double p) { return (int)Math.Round(a + (b - a) * Clamp01(p)); }
+
+        /// <summary>
+        /// 按 p 把 a 混向 b（p=0 全 a，p=1 全 b）。
+        /// TextRenderer 不吃 alpha，所以"文字淡入"只能走这条路：从底色混到目标色。
+        /// </summary>
+        public static Color Mix(Color a, Color b, double p)
+        {
+            double q = Clamp01(p);
+            return Color.FromArgb(
+                (int)Math.Round(a.R + (b.R - a.R) * q),
+                (int)Math.Round(a.G + (b.G - a.G) * q),
+                (int)Math.Round(a.B + (b.B - a.B) * q));
+        }
 
         public static Rectangle Lerp(Rectangle a, Rectangle b, double p)
         {
@@ -214,11 +236,47 @@ namespace DshLauncher
             return new Size(w, h);
         }
 
+        /// <summary>
+        /// 按可用宽度把文字截断（超出加省略号），与 <see cref="MeasureTracked"/> 用**同一套逐字测量**。
+        ///
+        /// 为什么必须有它：GDI 文字不受 <c>Graphics.SetClip</c> 约束，所有"按宽度裁字 / 擦入"
+        /// 都得自己截。这段逻辑原先在 HelpForm 与 StatusPanel 里各写了一遍，现在收在这里。
+        /// </summary>
+        public static string ClipTracked(Graphics g, string text, Font font, float tracking, int maxWidth)
+        {
+            if (string.IsNullOrEmpty(text) || maxWidth <= 0) return "";
+            int cx = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                Size s = TextRenderer.MeasureText(g, text[i].ToString(), font,
+                                                  new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
+                int step = s.Width + (int)Math.Round(tracking);
+                if (cx + step > maxWidth)
+                    return i > 0 ? text.Substring(0, i - 1) + "…" : "";
+                cx += step;
+            }
+            return text;
+        }
+
         public static void DrawTracked(Graphics g, string text, Font font, int x, int y, Color color, float tracking)
+        {
+            DrawTracked(g, text, font, x, y, color, tracking, 0);
+        }
+
+        /// <summary>
+        /// 宽字距排字（逐字符画）。<paramref name="maxX"/> &gt; 0 时，字符起点一旦越过它就停止绘制 ——
+        /// 用来做"自左向右擦入"。
+        ///
+        /// ⚠️ 为什么不用 <c>Graphics.SetClip</c>：这套排字走的是 <c>TextRenderer</c>（GDI），
+        /// **GDI 文字不认 GDI+ 的裁剪区** —— 黑底标签块的框被裁窄了、里面的白字却照画不误，
+        /// 于是出现"黑框没盖住字"。所有"擦入"都必须用这里的手动截断，别再依赖 SetClip。
+        /// </summary>
+        public static void DrawTracked(Graphics g, string text, Font font, int x, int y, Color color, float tracking, int maxX)
         {
             int cx = x;
             foreach (char ch in text)
             {
+                if (maxX > 0 && cx >= maxX) break;
                 Size s = TextRenderer.MeasureText(g, ch.ToString(), font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
                 TextRenderer.DrawText(g, ch.ToString(), font, new Point(cx, y), color, TextFormatFlags.NoPadding);
                 cx += s.Width + (int)Math.Round(tracking);

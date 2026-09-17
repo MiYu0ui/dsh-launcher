@@ -107,7 +107,10 @@ namespace DshLauncher
                 if (!_closing) { _closing = true; Close(); }
                 return;
             }
-            Opacity = Math.Min(1.0, now / 0.18) * (now > TEnd ? Math.Max(0.0, 1.0 - (now - TEnd) / TFade) : 1.0);
+            // 淡入用入场曲线、淡出用退场曲线（原库的规矩：退场更短更急，且换另一条曲线）
+            double inP = UiMotion.EaseIn(now / 0.18);
+            double outP = now > TEnd ? UiMotion.EaseOut((now - TEnd) / TFade) : 0.0;
+            Opacity = Math.Min(1.0, inP) * (now > TEnd ? Math.Max(0.0, 1.0 - outP) : 1.0);
             Invalidate();
         }
 
@@ -261,8 +264,13 @@ namespace DshLauncher
             return text.Substring(0, n);
         }
 
-        private static double Ease(double p) { return 1.0 - Math.Pow(1.0 - p, 3.0); }
+        /// <summary>缓动统一收到 UiMotion（原库 ui-transitions.ts 的两条全局曲线）。</summary>
+        private static double Ease(double p) { return UiMotion.EaseIn(p); }
 
+        /// <summary>
+        /// 唯一保留的过冲曲线：中心标志的弹入。
+        /// 原库没有 overshoot 母题，所以这是本项目**有意保留的一处例外**（去掉就少了那一下"弹"）。
+        /// </summary>
         private static double EaseOutBack(double p)
         {
             const double c1 = 1.70158, c3 = c1 + 1.0;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -79,6 +79,7 @@ namespace DshLauncher
             if (args.Port > 0) Config.Port = args.Port;
             if (!string.IsNullOrEmpty(args.Dir)) Config.Workspace = args.Dir;
             if (!configExisted) Config.Save();   // 命令行覆盖只在本次生效，不写回配置
+            WindowReveal.LoadFrom(Config);       // 二级界面动效档位（对话框是静态入口，档位集中放那边）
 
             Server = new DshServer();
             Server.Log += delegate(string message, LogLevel level) { AddLog(message, level); };
@@ -139,6 +140,7 @@ namespace DshLauncher
                 {
                     ShowForm();
                     if (args.Settings && _form != null && !_form.IsDisposed) OpenSettings(_form);
+            try { UpdateCheck.CleanupLeftovers(); } catch { }   // 主窗真的起来了，才清上一轮的 .old
                     ScheduleInstallPrompt();
                 }
             }
@@ -372,6 +374,7 @@ namespace DshLauncher
                 _settingsAfterReveal = false;
                 OpenSettings(_form);
             }
+            try { UpdateCheck.CleanupLeftovers(); } catch { }   // 开场动画这条路径：主窗展开之后才清 .old
             ScheduleInstallPrompt();
             StartDeploymentCheck();
         }
@@ -522,6 +525,7 @@ namespace DshLauncher
             menu.Items.Add(MenuItem("重启服务（强制）", delegate(object s, EventArgs e) { ForceStopExternal(true); }));
             menu.Items.Add(MenuItem("清扫残留 DSH 进程", delegate(object s, EventArgs e) { CleanupResiduals(); }));
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(MenuItem("帮助…", delegate(object s, EventArgs e) { OpenHelp(DlgOwner); }));
             menu.Items.Add(MenuItem("卸载…", delegate(object s, EventArgs e) { OpenUninstall(DlgOwner); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(MenuItem("退出启动器", delegate(object s, EventArgs e) { ExitApp(); }));
@@ -852,7 +856,11 @@ namespace DshLauncher
             foreach (ProcInfo p in roots)
             {
                 if (shown >= 10) { list.Add("其他=（其余 " + (roots.Count - shown) + " 个略）"); break; }
-                list.Add("进程 " + (shown + 1) + "=" + ProcessKiller.Describe(p));
+                // 把**命令行**也给出来：只显示 PID/名字/端口，等于让用户在看不到"要杀的到底是什么"
+                // 的情况下做决定 —— 而这是一次确认全杀。
+                string cmdline = p.CommandLine == null ? "" : p.CommandLine.Trim();
+                if (cmdline.Length > 110) cmdline = cmdline.Substring(0, 107) + "…";
+                list.Add("进程 " + (shown + 1) + "=" + ProcessKiller.Describe(p) + (cmdline.Length > 0 ? "  ·  " + cmdline : ""));
                 shown++;
             }
 
@@ -909,8 +917,9 @@ namespace DshLauncher
                 DialogResult r = dlg.ShowDialog(owner);
                 if (r == DialogResult.OK)
                 {
-                    Config.Save();
-                    AddLog("设置已保存。", LogLevel.Good);
+                    bool cfgSaved = Config.Save();
+                    WindowReveal.LoadFrom(Config);   // 档位改动从下一个二级界面开始生效
+                    AddLog(cfgSaved ? "设置已保存。" : "配置写入失败：这次的改动只存在于本次运行，重启启动器后会回退（自启项尤其要注意）。", cfgSaved ? LogLevel.Good : LogLevel.Bad);
                     if (Server.Status == ServerStatus.Running || Server.Status == ServerStatus.Starting)
                         AddLog("（端口/工作目录的改动会在下次启动服务时生效）", LogLevel.Dim);
                     pending = dlg.PendingInstallDir;
@@ -920,6 +929,15 @@ namespace DshLauncher
             if (uninstall) { OpenUninstall(owner); return; }
             // 搬迁必须在设置窗关闭之后执行：重启启动器时不能还压着一个模态窗
             if (pending != null) ApplyInstallLocation(owner, pending);
+        }
+
+        /// <summary>
+        /// 打开帮助二级界面。反正在这里等它关掉即可 —— 帮助窗自己管三级详情。
+        /// </summary>
+        public void OpenHelp(IWin32Window owner)
+        {
+            using (HelpForm dlg = new HelpForm())
+                dlg.ShowDialog(owner);
         }
 
         /// <summary>打开卸载二级界面；如果这次把启动器自己也卸了，收尾退出。</summary>

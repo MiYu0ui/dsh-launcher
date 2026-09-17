@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -110,7 +110,7 @@ namespace DshLauncher
             double textP = Theme.EaseOutCubic(Math.Max(0.0, (p - 0.62) / 0.38));
             DrawRows(g, r, outP);
             if (outP > 0.01)
-                Theme.Fill(g, Rectangle.Inflate(r, -1, -1), Color.FromArgb((int)(252 * outP), Theme.PanelHi));
+                Theme.Fill(g, Rectangle.Inflate(r, -1, -1), Color.FromArgb((int)(255 * outP), Theme.PanelHi));
             if (inP > 0.01) DrawLoader(g, r, inP, textP);
             DrawMorphSweep(g, r, p);
 
@@ -141,13 +141,6 @@ namespace DshLauncher
             return Color.FromArgb((int)(255 * Math.Min(1.0, Math.Max(0.0, a))), c);
         }
 
-        private static string Human(long b)
-        {
-            if (b >= 1073741824L) return (b / 1073741824.0).ToString("0.00") + " GB";
-            if (b >= 1048576L) return (b / 1048576.0).ToString("0.0") + " MB";
-            if (b >= 1024L) return (b / 1024.0).ToString("0.0") + " KB";
-            return b + " B";
-        }
 
         /// <summary>
         /// 加载动画：授权环那套语言的小尺寸版 —— 细环 + 按项数走的进度弧 +
@@ -209,9 +202,9 @@ namespace DshLauncher
 
             if (textP <= 0.02) return;
 
-            Color stageC = Mix(Theme.PanelHi, Theme.Amber, textP);
-            Color subC = Mix(Theme.PanelHi, Theme.Sub, textP);
-            Color inkC = Mix(Theme.PanelHi, Theme.Ink, textP);
+            Color stageC = Theme.Mix(Theme.PanelHi, Theme.Amber, textP);
+            Color subC = Theme.Mix(Theme.PanelHi, Theme.Sub, textP);
+            Color inkC = Theme.Mix(Theme.PanelHi, Theme.Ink, textP);
 
             Theme.DrawTracked(g, _stage, Theme.FontMonoSmall, r.X + Theme.S(14), r.Y + Theme.S(10), stageC, Theme.SF(1.6f));
             if (_prog != null)
@@ -230,7 +223,7 @@ namespace DshLauncher
             if (_prog != null)
             {
                 TimeSpan el = _startedAt == DateTime.MinValue ? TimeSpan.Zero : (DateTime.Now - _startedAt);
-                stat = "已删除 " + Human(_prog.BytesDone) + " / " + Human(_prog.BytesTotal)
+                stat = "已删除 " + Uninstaller.Human(_prog.BytesDone) + " / " + Uninstaller.Human(_prog.BytesTotal)
                      + "　·　" + ((int)el.TotalMinutes).ToString("00") + ":" + el.Seconds.ToString("00");
             }
             else stat = "正在准备…";
@@ -243,15 +236,6 @@ namespace DshLauncher
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
 
-        /// <summary>把 a 往 b 插值（p=0 全 a，p=1 全 b）。给 TextRenderer 造"淡入"用。</summary>
-        private static Color Mix(Color a, Color b, double p)
-        {
-            double q = Math.Min(1.0, Math.Max(0.0, p));
-            return Color.FromArgb(
-                (int)Math.Round(a.R + (b.R - a.R) * q),
-                (int)Math.Round(a.G + (b.G - a.G) * q),
-                (int)Math.Round(a.B + (b.B - a.B) * q));
-        }
 
         /// <summary>明细列表本体（清单形态用；过渡时由 slide 让整块向上微移）。</summary>
         private void DrawRows(Graphics g, Rectangle r, double slide)
@@ -398,7 +382,17 @@ namespace DshLauncher
         {
             _cfg = cfg;
             _server = server;
+            // 必须在 BuildUi 之前建：BuildUi 里的 AddSection 要把章节锚点登记进来
+            _reveal = new WindowReveal(this, WindowReveal.Level, false);
             BuildUi();
+        }
+
+        private readonly WindowReveal _reveal;
+
+        /// <summary>登记一个章节锚点：标题由 OnPaint 按导轨进度自绘，不再用子控件 Label。</summary>
+        private void AddSection(string index, string cn, string en, int y)
+        {
+            if (_reveal != null) _reveal.AddSection(y, index, cn, en);
         }
 
         private bool _scanStarted;
@@ -408,6 +402,8 @@ namespace DshLauncher
             base.OnShown(e);
             // 必须等窗口句柄建好再开后台扫描：StartScan 结束时要用 BeginInvoke 切回 UI 线程
             if (!_scanStarted) { _scanStarted = true; StartScan(); }
+            // 扫描先起，再播入场 —— 动画绝不能挡在清点前面（"正在清点…"那句话还要实时更新）
+            if (_reveal != null) _reveal.BeginEnter();
         }
 
         private void BuildUi()
@@ -424,10 +420,21 @@ namespace DshLauncher
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             AutoScaleMode = AutoScaleMode.None;
-            ClientSize = new Size(Theme.S(DesignW), Theme.S(DesignH));
+            // 小屏兜底：设计高 940（150% 缩放下 1410px）。屏幕装不下时**不裁内容**，改成可滚动 ——
+            // 否则「执行卸载」会落在可视区之外，而它是不可逆操作唯一的入口。
+            // （内容与按钮仍按 DesignH 排布，滚动即可触达；按钮 Y 因此不用改。）
+            int designH = DesignH;
+            try
+            {
+                int fit = (int)Math.Floor(Screen.PrimaryScreen.WorkingArea.Height /
+                                          (double)(Theme.Scale <= 0f ? 1f : Theme.Scale)) - 24;
+                if (fit > 420 && fit < designH) { designH = fit; AutoScroll = true; }
+            }
+            catch { }
+            ClientSize = new Size(Theme.S(DesignW), Theme.S(designH));
             DoubleBuffered = true;
 
-            AddLabel("选择卸载范围", PadX, 96);
+            AddSection("SECT. 01", "选择卸载范围", "SCOPE", 96);
 
             _radios = new RadioButton[Modes.Length];
             int y = 120;
@@ -456,7 +463,7 @@ namespace DshLauncher
                 y += 32;
             }
 
-            AddLabel("将执行的操作", PadX, y + 10);
+            AddSection("SECT. 02", "将执行的操作", "PLANNED OPERATIONS", y + 10);
 
             _list = new UninstallList();
             _list.Location = new Point(Theme.S(PadX), Theme.S(y + 34));
@@ -600,19 +607,12 @@ namespace DshLauncher
             _scanning = false;
             for (int i = 0; i < _radios.Length; i++)
             {
-                _radios[i].Text = ModeTitles[i] + "   · " + SizeText(_modeBytes[i]) + (_modeDanger[i] ? "   · 需打字确认" : "");
+                _radios[i].Text = ModeTitles[i] + "   · " + Uninstaller.Human(_modeBytes[i]) + (_modeDanger[i] ? "   · 需打字确认" : "");
             }
             _btnExport.Enabled = true;
             ReloadPlan();
         }
 
-        private static string SizeText(long b)
-        {
-            if (b >= 1073741824L) return (b / 1073741824.0).ToString("0.00") + " GB";
-            if (b >= 1048576L) return (b / 1048576.0).ToString("0.0") + " MB";
-            if (b >= 1024L) return (b / 1024.0).ToString("0.0") + " KB";
-            return b + " B";
-        }
 
         // ---------------- 计划刷新 ----------------
 
@@ -721,6 +721,12 @@ namespace DshLauncher
 
         private bool _allowClose;
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _reveal != null) _reveal.Dispose();
+            base.Dispose(disposing);
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_busy && !_allowClose && e.CloseReason != CloseReason.WindowsShutDown)
@@ -732,6 +738,8 @@ namespace DshLauncher
                 if (r != ConfirmDialog.Choice.Confirm) { e.Cancel = true; return; }
                 _allowClose = true;
             }
+            // 非执行期关闭：先播 200ms 退场再真关（_allowClose 已置位时直接放行）
+            if (!_allowClose && _reveal != null && _reveal.InterceptClose(e)) return;
             base.OnFormClosing(e);
         }
 
@@ -875,6 +883,7 @@ namespace DshLauncher
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return true; }   // 入场期间按一下就跳过
             if (keyData == Keys.Escape && !_busy)
             {
                 DialogResult = DialogResult.Cancel;
@@ -887,6 +896,7 @@ namespace DshLauncher
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return; }
             if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
@@ -909,40 +919,97 @@ namespace DshLauncher
             int band = Theme.S(3);
             int right = w - Theme.S(PadX);
 
+            // ---- 版式就位（与设置窗同一套元素，同一套时间轴）----
             Theme.Fill(g, ClientRectangle, Theme.Bg);
+            if (_reveal != null) UiPaint.Grid(g, ClientRectangle, _reveal.GridP, Theme.S(44), 16);
             Theme.Fill(g, new Rectangle(0, 0, w, band), Theme.Green);
             Theme.Fill(g, new Rectangle(0, band, w, h - band), Theme.Panel);
             Theme.Rule(g, 0, h - 1, w, Theme.Line);
 
+            // 刻度尺逐根 11ms 错峰点亮（27 根 ≈ 300ms，与盖板揭开同窗；原库 34ms 是列表行的步长）
             int step = Theme.S(22);
             for (int x = Theme.S(PadX), i = 0; x < right; x += step, i++)
             {
                 bool tall = (i % 5) == 0;
-                Theme.VRule(g, x, h - 1 - Theme.S(tall ? 8 : 4), h - 1, tall ? Theme.Line : Theme.LineSoft);
+                double tp = _reveal != null ? _reveal.Tick(i, 11, 300) : 1.0;
+                if (tp <= 0.02) continue;
+                int th = tall ? 8 : 4;
+                Theme.VRule(g, x, h - 1 - Theme.S((int)Math.Round(th * tp)), h - 1,
+                            Theme.Mix(Theme.Panel, tall ? Theme.Line : Theme.LineSoft, tp));
             }
 
             Image logo = Res.Logo();
             int box = Theme.S(32);
-            if (logo != null)
+            double markP = _reveal != null ? _reveal.TitleP : 1.0;
+            double barP = _reveal != null ? _reveal.BarP : 1.0;
+            if (logo != null && markP > 0.02)
             {
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.DrawImage(logo, new Rectangle(Theme.S(PadX), band + Theme.S(20), box, box));
             }
-            Theme.DrawTracked(g, "UNINSTALL", Theme.FontTechBold, Theme.S(PadX + 44), band + Theme.S(23), Theme.Ink, Theme.SF(2.2f));
-            Theme.DrawTracked(g, "卸载", Theme.FontSmall, Theme.S(PadX + 46), band + Theme.S(42), Theme.Sub, Theme.SF(1.2f));
+
+            // 标题：浅色高亮条先到位，文字再自左向右擦入
+            int titleX = Theme.S(PadX + 44);
+            int barW = Theme.S(112);
+            UiPaint.HighlightBar(g, new Rectangle(titleX - Theme.S(6), band + Theme.S(17), barW, Theme.S(22)), barP, true);
+            double titleP = _reveal != null ? _reveal.TitleP : 1.0;
+            if (titleP > 0.01)
+            {
+                Theme.DrawTracked(g, "UNINSTALL", Theme.FontTechBold, titleX, band + Theme.S(23), Theme.Ink, Theme.SF(2.2f), titleX + (int)Math.Round(barW * titleP));
+            }
+            if (markP > 0.02)
+                Theme.DrawTracked(g, "卸载", Theme.FontSmall, Theme.S(PadX + 46), band + Theme.S(42),
+                                  Theme.Mix(Theme.Panel, Theme.Sub, markP), Theme.SF(1.2f));
 
             Image mark = Res.Mark();
             int markH = Theme.S(18);
             int markW = (int)Math.Round(markH * 2.2);
-            if (mark != null)
+            if (mark != null && markP > 0.02)
             {
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.DrawImage(mark, new Rectangle(right - markW, Theme.S(34), markW, markH));
             }
             Theme.DrawTrackedRight(g, "RHINE · LAB", Theme.FontMonoSmall,
-                right - markW - Theme.S(10), Theme.S(37), Theme.Sub, Theme.SF(1.6f));
+                right - markW - Theme.S(10), Theme.S(37), Theme.Mix(Theme.Panel, Theme.Sub, markP), Theme.SF(1.6f));
+
+            DrawSections(g);
+
+            if (_reveal != null && _reveal.WantsLayout)
+                UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)),
+                                 Theme.Ink, _reveal.BracketPhases());
 
             base.OnPaint(e);
+        }
+
+        /// <summary>章节导轨 + 每节的「chip + 中文标题 + 灰色英文小字」（与设置窗同一套画法）。</summary>
+        private void DrawSections(Graphics g)
+        {
+            if (_reveal == null || !_reveal.WantsLayout || _reveal.Sections.Count == 0) return;
+
+            int railX = Theme.S(14);
+            int railTop = Theme.S(_reveal.Sections[0].Y) + Theme.S(7);
+            int railBottom = Theme.S(_reveal.Sections[_reveal.Sections.Count - 1].Y) + Theme.S(7);
+            UiPaint.SectionRail(g, railX, railTop, railBottom, _reveal.RailP,
+                                _reveal.SectionYs(), _reveal.SectionPhases());
+
+            for (int i = 0; i < _reveal.Sections.Count; i++)
+            {
+                WindowReveal.Section s = _reveal.Sections[i];
+                double p = _reveal.SectionP(i);
+                if (p <= 0.01) continue;
+
+                int x = Theme.S(PadX);
+                int y = Theme.S(s.Y);
+                int chipW = UiPaint.Chip(g, x, y, s.Index, p);
+
+                int tx = x + chipW + Theme.S(10);
+                Theme.DrawTracked(g, s.Cn, Theme.FontUiBold, tx, y + Theme.S(3),
+                                  Theme.Mix(Theme.Bg, Theme.Ink, p), Theme.SF(0.6f));
+                Size cn = Theme.MeasureTracked(g, s.Cn, Theme.FontUiBold, Theme.SF(0.6f));
+                if (s.En.Length > 0)
+                    Theme.DrawTracked(g, s.En, Theme.FontMonoSmall, tx + cn.Width + Theme.S(12), y + Theme.S(4),
+                                      Theme.Mix(Theme.Bg, Theme.Sub, p), Theme.SF(1.6f));
+            }
         }
     }
 }

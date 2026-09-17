@@ -58,6 +58,23 @@ namespace DshLauncher
 
             Layout(okText);
             Anim.Track(this, 1);
+            _reveal = new WindowReveal(this, WindowReveal.Level, true);
+        }
+
+        private readonly WindowReveal _reveal;
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (_reveal != null) _reveal.BeginEnter();
+            // 先给输入框焦点再播动画：打字随时可以开始，入场不挡输入
+            try { _input.Focus(); } catch { }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (_reveal != null && _reveal.InterceptClose(e)) return;
+            base.OnFormClosing(e);
         }
 
         protected override CreateParams CreateParams
@@ -72,7 +89,11 @@ namespace DshLauncher
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) Anim.Untrack(this);
+            if (disposing)
+            {
+                Anim.Untrack(this);
+                if (_reveal != null) _reveal.Dispose();
+            }
             base.Dispose(disposing);
         }
 
@@ -191,14 +212,12 @@ namespace DshLauncher
             Invalidate();
         }
 
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            try { _input.Focus(); } catch { }
-        }
-
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // 入场动画期间**不吞按键**：这个框全靠打字，吞掉第一个字符是不可接受的。
+            // 所以只是顺手把动画跳完，按键照旧往下走（与确认框不同 —— 那边可以吞，这边不行）。
+            if (_reveal != null && _reveal.Busy) _reveal.Skip();
+
             if (keyData == Keys.Escape)
             {
                 _confirmed = false;
@@ -240,13 +259,17 @@ namespace DshLauncher
             Theme.Fill(g, new Rectangle(0, band, w, Theme.S(HeaderH) - band), Theme.Panel);
             Theme.Rule(g, 0, Theme.S(HeaderH) - 1, w, Theme.Line);
             Theme.DrawLiveFrame(g, new Rectangle(0, 0, w - 1, h - 1), Theme.Line, Theme.SignalAlert, false, 6.2, 0.4);
-            Theme.CornerTicks(g, new Rectangle(Theme.S(9), Theme.S(9), w - Theme.S(19), h - Theme.S(19)), Theme.Line, Theme.S(11));
 
-            Theme.DrawTracked(g, _track, Theme.FontMonoSmall, Theme.S(Pad), band + Theme.S(14), Theme.Sub, Theme.SF(1.6f));
+            // 顶部标注：标签块（chip）+ 标题擦入（与确认框同一套）
+            double chipP = _reveal != null ? _reveal.ChipP : 1.0;
+            double titleP = _reveal != null ? _reveal.TitleP : 1.0;
+            UiPaint.Chip(g, Theme.S(Pad), band + Theme.S(11), _track, chipP);
 
             int y = Theme.S(HeaderH) + Theme.S(16);
+            // 标题用插值淡入（GDI 文字不认 GDI+ 裁剪区，SetClip 擦入对它无效）
             TextRenderer.DrawText(g, _headline, Theme.FontStatus,
-                new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(26)), Theme.SignalAlert,
+                new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(26)),
+                Theme.Mix(Theme.Bg, Theme.SignalAlert, titleP),
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             y += Theme.S(26);
             Theme.SweepRule(g, Theme.S(Pad), right, y + Theme.S(4), Theme.Line, Theme.SignalAlert, 8.0, 0.2);
@@ -256,7 +279,8 @@ namespace DshLauncher
             {
                 y += Theme.S(12);
                 TextRenderer.DrawText(g, _message, Theme.FontUi,
-                    new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(_messageH)), Theme.InkSoft,
+                    new Rectangle(Theme.S(Pad), y, right - Theme.S(Pad), Theme.S(_messageH)),
+                    Theme.InkSoft,
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
                 y += Theme.S(_messageH) + Theme.S(18);
             }
@@ -269,11 +293,13 @@ namespace DshLauncher
                     string label = raw, value = "";
                     int eq = raw.IndexOf('=');
                     if (eq > 0) { label = raw.Substring(0, eq); value = raw.Substring(eq + 1); }
-                    Theme.DrawTracked(g, label, Theme.FontMonoSmall, Theme.S(Pad), fy + Theme.S(4), Theme.Sub, Theme.SF(1.2f));
+                    Theme.DrawTracked(g, label, Theme.FontMonoSmall, Theme.S(Pad), fy + Theme.S(4),
+                                      Theme.Sub, Theme.SF(1.2f));
                     if (value.Length > 0)
                     {
                         TextRenderer.DrawText(g, value, Theme.FontMono,
-                            new Rectangle(Theme.S(Pad + 92), fy, right - Theme.S(Pad + 92), Theme.S(22)), Theme.Ink,
+                            new Rectangle(Theme.S(Pad + 92), fy, right - Theme.S(Pad + 92), Theme.S(22)),
+                            Theme.Ink,
                             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
                     }
                     fy += Theme.S(24);
@@ -285,17 +311,24 @@ namespace DshLauncher
             if (_warningH > 0)
             {
                 TextRenderer.DrawText(g, _warning, Theme.FontUiBold,
-                    new Rectangle(Theme.S(Pad), y + Theme.S(6), right - Theme.S(Pad), Theme.S(_warningH)), Theme.SignalAlert,
+                    new Rectangle(Theme.S(Pad), y + Theme.S(6), right - Theme.S(Pad), Theme.S(_warningH)),
+                    Theme.SignalAlert,
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
             }
 
             // 「请输入 <确认词>」提示行
             int hintY = Theme.S(_inputY) - Theme.S(22);
-            Theme.DrawTracked(g, "请输入", Theme.FontMonoSmall, Theme.S(Pad), hintY + Theme.S(4), Theme.Sub, Theme.SF(1.2f));
+            Theme.DrawTracked(g, "请输入", Theme.FontMonoSmall, Theme.S(Pad), hintY + Theme.S(4),
+                              Theme.Sub, Theme.SF(1.2f));
             TextRenderer.DrawText(g, _want, Theme.FontMono,
                 new Rectangle(Theme.S(Pad + 58), hintY, right - Theme.S(Pad + 58), Theme.S(20)),
                 Matches() ? Theme.Green : Theme.Amber,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+            // 四角括号：框住整张卡片（danger 态用告警色）
+            if (_reveal != null && _reveal.WantsLayout)
+                UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)),
+                                 Theme.SignalAlert, _reveal.BracketPhases());
 
             base.OnPaint(e);
         }

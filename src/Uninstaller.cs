@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -759,7 +759,7 @@ namespace DshLauncher
             catch { return null; }
         }
 
-        private static string Human(long b)
+        internal static string Human(long b)   // 卸载窗也用这一份，别再各写一遍
         {
             if (b >= 1073741824L) return (b / 1073741824.0).ToString("0.00") + " GB";
             if (b >= 1048576L) return (b / 1048576.0).ToString("0.0") + " MB";

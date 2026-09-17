@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 
@@ -185,6 +185,22 @@ namespace DshLauncher
 
             string installed = AppPaths.ExePath;
             string old = installed + ".old";
+            string staged = installed + ".new";
+
+            // ① 先把新版本**完整**复制成 .new —— 这一步不碰现有 exe，失败零损失
+            try
+            {
+                if (File.Exists(staged)) { try { File.Delete(staged); } catch { } }
+                File.Copy(info.CandidatePath, staged, true);
+            }
+            catch (Exception ex)
+            {
+                error = "复制新版本失败（现有程序未受影响）：" + ex.Message;
+                try { if (File.Exists(staged)) File.Delete(staged); } catch { }
+                return false;
+            }
+
+            // ② 新版本已完整落地，再把当前 exe 让位成 .old
             try
             {
                 if (File.Exists(old)) { try { File.Delete(old); } catch { } }
@@ -193,17 +209,25 @@ namespace DshLauncher
             catch (Exception ex)
             {
                 error = "无法重命名当前程序：" + ex.Message;
+                try { if (File.Exists(staged)) File.Delete(staged); } catch { }
                 return false;
             }
 
+            // ③ 把 .new 顶到原位。失败时**无条件回滚** ——
+            //    原来那句 `if (!File.Exists(installed)) File.Move(old, installed)` 在
+            //    File.Copy 半途失败（磁盘满）留下半截 exe 时永远为假，结果安装路径上
+            //    一个可执行文件都没有，而提示只说"复制失败"，用户以为程序还在。
             try
             {
-                File.Copy(info.CandidatePath, installed, true);
+                File.Move(staged, installed);
             }
             catch (Exception ex)
             {
-                error = "复制新版本失败：" + ex.Message;
-                try { if (!File.Exists(installed)) File.Move(old, installed); } catch { }
+                error = "替换新版本失败：" + ex.Message;
+                try { if (File.Exists(installed)) File.Delete(installed); } catch { }
+                try { File.Move(old, installed); }
+                catch { error += "（回滚也失败：请手工把 " + old + " 改回 " + installed + "）"; }
+                try { if (File.Exists(staged)) File.Delete(staged); } catch { }
                 return false;
             }
             return true;

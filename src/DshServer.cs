@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -770,9 +770,43 @@ namespace DshLauncher
                     _proc = null;
                 }
             }
-            if (IsProcessAlive) Emit("进程未能正常结束，请手动检查任务管理器。", LogLevel.Warn);
-            else Emit("服务已停止。", LogLevel.Good);
-            SetStatus(ServerStatus.Stopped);
+            if (IsProcessAlive)
+            {
+                Emit("进程未能正常结束，请手动检查任务管理器。", LogLevel.Warn);
+                return;                       // 进程还在，绝不宣告"已停止"
+            }
+
+            // ⚠️ **端口复验**：taskkill 的退出码没看，"进程没了"也不等于端口真的释放。
+            //    以前这里无条件宣告"服务已停止"并置成 Stopped —— 用户据此以为可以安全地动数据目录了。
+            //    现在只有端口确实空闲才敢这么说；否则如实告警，状态宁可停在"运行中"也不撒谎。
+            int stopPort = PortFromWebUrl();
+            bool portFree = stopPort <= 0 || ProcessKiller.PortFree(stopPort);
+            for (int i = 0; i < 20 && !portFree; i++) { Thread.Sleep(100); portFree = ProcessKiller.PortFree(stopPort); }
+
+            if (portFree)
+            {
+                Emit("服务已停止。", LogLevel.Good);
+                SetStatus(ServerStatus.Stopped);
+            }
+            else
+            {
+                Emit("进程已终止，但端口 " + stopPort + " 仍被占用：可能有残留进程，先别动数据目录。", LogLevel.Warn);
+                SetStatus(ServerStatus.Running);
+            }
+        }
+
+        /// <summary>从 WebUrl 里取端口（DshServer 不单独存端口，启动时把规范地址存进 WebUrl）。</summary>
+        private int PortFromWebUrl()
+        {
+            try
+            {
+                string u = WebUrl == null ? "" : WebUrl;
+                int colon = u.LastIndexOf(':');
+                if (colon <= 0) return 0;
+                int p;
+                return int.TryParse(u.Substring(colon + 1).TrimEnd('/'), out p) ? p : 0;
+            }
+            catch { return 0; }
         }
 
         /// <summary>不拥有进程时（外部启动），仅重置界面状态。</summary>

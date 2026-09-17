@@ -38,8 +38,11 @@ namespace DshLauncher
         private ChromeButton _btnClose;
         private ChromeButton _btnMin;
         private ChromeButton _btnGear;
+        private ChromeButton _btnHelp;
         private bool _gearHover;
+        private bool _helpHover;
         private Rectangle _gearLabelRect;
+        private Rectangle _helpLabelRect;
         private string _lastLog = "";
         private bool _allowClose;
 
@@ -168,20 +171,37 @@ namespace DshLauncher
             _btnGear.MouseLeave += delegate(object s, EventArgs e) { _gearHover = false; Invalidate(); };
             Controls.Add(_btnGear);
 
+            // 「? 帮助」：摆在「设置」左边，同样的图标 + 文字、同样的"两处都可点"
+            _btnHelp = new ChromeButton(ChromeButton.GlyphKind.Help);
+            using (Graphics gg = CreateGraphics())
+            {
+                BrandBox bx = BrandCluster(gg);
+                _btnHelp.Location = new Point(bx.HelpGlyphLeft, bx.MarkY + (bx.MarkH - bx.HelpGlyphH) / 2);
+                _btnHelp.Size = new Size(bx.HelpGlyphW, bx.HelpGlyphH);
+                _helpLabelRect = new Rectangle(bx.HelpLabelLeft, bx.MarkY, bx.HelpLabelW, bx.MarkH);
+            }
+            _btnHelp.BackColor = Theme.Panel;
+            _btnHelp.Invoked += delegate(object s, EventArgs e) { _ctx.OpenHelp(this); };
+            _btnHelp.MouseEnter += delegate(object s, EventArgs e) { _helpHover = true; Invalidate(); };
+            _btnHelp.MouseLeave += delegate(object s, EventArgs e) { _helpHover = false; Invalidate(); };
+            Controls.Add(_btnHelp);
+
             ResumeLayout(false);
         }
 
-        /// <summary>右上角「设置齿轮 | 设置 | RHINE · LAB | 莱茵标志」这一串的几何。</summary>
+        /// <summary>右上角「? 帮助 | ⚙ 设置 | RHINE · LAB | 莱茵标志」这一串的几何。</summary>
         private class BrandBox
         {
             public int MarkX, MarkY, MarkW, MarkH;
             public int TextLeft;
             public int LabelLeft, LabelW;
             public int GearLeft, GearW, GearH;
+            public int HelpLabelLeft, HelpLabelW;
+            public int HelpGlyphLeft, HelpGlyphW, HelpGlyphH;
         }
 
         /// <summary>
-        /// 右侧品牌锁排的横向布局。**绘制与控件定位共用它** ——
+        /// 右侧品牌锁排的横向布局（从右往左排）。**绘制与控件定位共用它** ——
         /// 两处各算一套的话，字体或缩放一变就会错位。
         /// </summary>
         private BrandBox BrandCluster(Graphics g)
@@ -202,6 +222,13 @@ namespace DshLauncher
             b.GearW = Theme.S(28);
             b.GearH = Theme.S(24);
             b.GearLeft = b.LabelLeft - Theme.S(8) - b.GearW;
+
+            // 再往左一组「帮助」：同样的 8px 图标-文字间距、26px 组间距，与设置那组等距
+            b.HelpLabelW = Theme.MeasureTracked(g, "帮助", Theme.FontSmall, Theme.SF(1.2f)).Width;
+            b.HelpLabelLeft = b.GearLeft - Theme.S(26) - b.HelpLabelW;
+            b.HelpGlyphW = Theme.S(28);
+            b.HelpGlyphH = Theme.S(24);
+            b.HelpGlyphLeft = b.HelpLabelLeft - Theme.S(8) - b.HelpGlyphW;
             return b;
         }
 
@@ -224,6 +251,12 @@ namespace DshLauncher
             if (!_gearLabelRect.IsEmpty && _gearLabelRect.Contains(e.Location))
             {
                 _ctx.OpenSettings(this);
+                return;
+            }
+            // 「帮助」二字同理
+            if (!_helpLabelRect.IsEmpty && _helpLabelRect.Contains(e.Location))
+            {
+                _ctx.OpenHelp(this);
                 return;
             }
             // 标题栏区域按住即可拖动窗口
@@ -411,6 +444,7 @@ namespace DshLauncher
             _btnUpdate.Enabled = !busy;
             _btnUninstall.Enabled = !busy;
             if (_btnGear != null) _btnGear.Enabled = !busy;
+            if (_btnHelp != null) _btnHelp.Enabled = !busy;
         }
 
         public void AllowClose() { _allowClose = true; }
@@ -496,6 +530,9 @@ namespace DshLauncher
             // 齿轮旁边的「设置」二字：让人一眼知道那里是设置（悬停时与图标一起转暖褐）
             Theme.DrawTracked(g, "设置", Theme.FontSmall,
                 bb.LabelLeft, bb.MarkY + Theme.S(3), _gearHover ? Theme.Amber : Theme.Sub, Theme.SF(1.2f));
+            // 再往左是「帮助」：与设置同一套"图标 + 文字"，两个字都可点
+            Theme.DrawTracked(g, "帮助", Theme.FontSmall,
+                bb.HelpLabelLeft, bb.MarkY + Theme.S(3), _helpHover ? Theme.Amber : Theme.Sub, Theme.SF(1.2f));
 
             UpdateInfo up = _ctx.Update;
             bool hasUpdate = up != null && up.Available;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
@@ -95,6 +95,17 @@ namespace DshLauncher
                 bool[] app = Shortcuts.CreateAppLinks(target, targetDir);
                 if (cfg.AutoStart) Shortcuts.CreateAutoStartLink(target, targetDir);
 
+                // ⚠️ 快捷方式没全部重建成功，就**别清旧目录**：旧 exe 一被删，桌面/开始菜单上那些
+                //    没重建成功的 .lnk 立刻变成死链，用户只会看到一个点不开的图标。旧目录留着不影响
+                //    使用（设置里还有「创建 / 修复快捷方式」可以补）。
+                if (!app[0] || !app[1])
+                {
+                    cfg.CleanupDir = "";
+                    cfg.Save();
+                    FileLog.Write("[Warn] 快捷方式未能全部重建（桌面=" + (app[0] ? "OK" : "失败") +
+                                  " 开始菜单=" + (app[1] ? "OK" : "失败") + "），已取消清理旧安装位置以免留下死链。");
+                }
+
                 FileLog.Write("[Info] 安装位置设为 " + targetDir +
                               (sameDir ? "（程序本就在此，未复制）" : "（程序本体已复制到该目录）") +
                               "；快捷方式 桌面=" + (app[0] ? "OK" : "失败") + " 开始菜单=" + (app[1] ? "OK" : "失败") +
@@ -147,25 +158,35 @@ namespace DshLauncher
             {
                 string dir = cfg.CleanupDir;
                 if (string.IsNullOrEmpty(dir)) return null;
-                cfg.CleanupDir = "";
-                cfg.Save();
 
-                if (!Directory.Exists(dir)) return null;
-                if (SameDir(dir, AppPaths.InstallDir)) return null;      // 已经就地，别动自己
-
-                string exe = Path.Combine(dir, Path.GetFileName(AppPaths.ExePath));
-                if (File.Exists(exe))
-                {
-                    try { File.Delete(exe); }
-                    catch { return "旧安装位置的 exe 暂时删不掉（可能仍在运行）：" + exe; }
-                }
+                // ⚠️ 以前这里先 `cfg.CleanupDir = ""; cfg.Save();` 再删 —— 删除失败（旧 exe 还在跑）
+                //    待办就永久丢了，旧副本永远残留、再也不会重试。现在**删成功之后才清标记**。
+                bool done = false;
                 try
                 {
-                    if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir, false);
-                    else return "已移除旧位置的程序本体，但该目录还有其它文件，保留：" + dir;
+                    if (!Directory.Exists(dir)) { done = true; return null; }
+                    if (SameDir(dir, AppPaths.InstallDir)) { done = true; return null; }   // 已经就地，别动自己
+
+                    string exe = Path.Combine(dir, Path.GetFileName(AppPaths.ExePath));
+                    if (File.Exists(exe))
+                    {
+                        try { File.Delete(exe); }
+                        catch { return "旧安装位置的 exe 暂时删不掉（可能仍在运行）：" + exe + "　下次启动会再试。"; }
+                    }
+                    try
+                    {
+                        if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir, false);
+                        else { done = true; return "已移除旧位置的程序本体，但该目录还有其它文件，保留：" + dir; }
+                    }
+                    catch { }
+                    done = true;
+                    return "已清理旧安装位置：" + dir;
                 }
-                catch { }
-                return "已清理旧安装位置：" + dir;
+                finally
+                {
+                    // 只有"确实没有待办"时才清标记；失败路径保留，等下次启动重试
+                    if (done) { cfg.CleanupDir = ""; cfg.Save(); }
+                }
             }
             catch { return null; }
         }
