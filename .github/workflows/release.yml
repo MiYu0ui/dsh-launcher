@@ -1,7 +1,5 @@
 name: release
 
-# 打 tag（v1.7.2 这种）即自动构建并把 exe + SHA-256 附到 Release。
-# 启动器的「检查更新」读的就是这个 Release 里的资产。
 
 on:
   push:
