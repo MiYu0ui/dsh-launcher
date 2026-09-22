@@ -137,7 +137,7 @@ namespace DshLauncher
                     "  --settings                     打开界面并直接进入设置",
                     "  --no-boot                      跳过开启动画",
                     "  --port 3080                    临时指定端口",
-                    "  --dir D:\\项目                   临时指定工作目录（--workspace 同义）",
+                    "  --dir D:\\Work                   临时指定工作目录（--workspace 同义）",
                     "  --after-update                 更新后重启（先等旧实例交出单实例锁）",
                     "  --after-install                迁移安装位置后重启（同上）",
                     "  --selftest 报告.txt            自检并输出报告",

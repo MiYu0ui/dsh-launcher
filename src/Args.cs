@@ -98,7 +98,7 @@ namespace DshLauncher
                 "  DSH Launcher.exe --settings      打开界面并直接进入设置\r\n" +
                 "  DSH Launcher.exe --no-boot       跳过开启动画\r\n" +
                 "  DSH Launcher.exe --port 3080     临时指定端口\r\n" +
-                "  DSH Launcher.exe --dir D:\\项目   临时指定工作目录\r\n" +
+                "  DSH Launcher.exe --dir D:\\Work   临时指定工作目录\r\n" +
                 "  DSH Launcher.exe --after-update  更新后重启（先等旧实例交出单实例锁）\r\n" +
                 "  DSH Launcher.exe --after-install 迁移安装位置后重启（同上）\r\n" +
                 "  DSH Launcher.exe --selftest 报告.txt [--mode direct|npx] [--verify] [--port 3099]\r\n" +

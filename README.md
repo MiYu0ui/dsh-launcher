@@ -285,7 +285,7 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| **工作目录** | DSH 以该目录作为工作区，默认 `D:\项目\004` |
+| **工作目录** | DSH 以该目录作为工作区，首次运行取用户目录，可在设置里改 |
 | **安装位置** | 程序本体放在哪里。**首次运行由你自己选**（默认位置 / 自定义 / 绿色免安装），之后可随时在设置里改 |
 | **端口** | 默认 `3080` |
 | **npm 方式** | 每次经 npm 启动 `@deepseek-ai/dsh@<当前版本>`，可开启下载源完整性核验（推荐，沿用原有安全策略） |
@@ -343,7 +343,7 @@ DSH Launcher.exe --autostart     后台静默启动服务（供开机自启使�
 DSH Launcher.exe --minimized     只放进系统托盘，不显示窗口
 DSH Launcher.exe --settings      打开界面并直接进入设置
 DSH Launcher.exe --port 3080     临时指定端口（不写回配置）
-DSH Launcher.exe --dir D:\项目   临时指定工作目录（不写回配置）
+DSH Launcher.exe --dir D:\Work   临时指定工作目录（不写回配置）
 DSH Launcher.exe --after-update  更新后重启（先等旧实例交出单实例锁）
 DSH Launcher.exe --after-install 迁移安装位置后重启（同上）
 DSH Launcher.exe --selftest 报告.txt [--mode direct|npx] [--verify] [--port 3099]
@@ -548,10 +548,10 @@ dsh-launcher/
 
 卸载引擎只处理它自己识别出来的白名单路径，并且：
 
-- **不碰你的工作区**（`D:\项目\004` 那 700 多 MB 工程文件）
+- **不碰你的工作区**（哪怕里面放着几百 MB 的工程文件）
 - **不碰非 DSH 的 npx 缓存**——实测本机 `_npx` 下 4 个目录里只有 2 个是 DSH，另外两个共 489 MB 是别的包
 - **不碰 `%APPDATA%\npm`**（那里是 claude-code / pnpm 等，与 DSH 无关）
-- **不卸载 Node.js**——除非它确实装在我们部署时会用的位置；自装的 Node（如 `D:\AI\Node`）只会被列出来并注明"不会动"
+- **不卸载 Node.js**——除非它确实装在我们部署时会用的位置；自装的 Node（如 `D:\Node`）只会被列出来并注明"不会动"
 
 这三条会直接显示在界面上（标 `··` 不动的那些行），让人看得见"我不会乱删"。
 

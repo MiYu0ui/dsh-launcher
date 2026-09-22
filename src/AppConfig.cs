@@ -74,13 +74,11 @@ namespace DshLauncher
 
         /// <summary>
         /// 首次运行时的默认工作目录：按候选顺序取第一个**存在**的目录，都不存在才退回用户目录。
-        /// 第一个候选是开发机上的写死路径，别的机器上不存在会自动顺延，不影响使用。
         /// </summary>
         public static string DefaultWorkspace()
         {
             string[] candidates = new string[]
             {
-                @"D:\项目\004",
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "DeepSeekHarnessDemo"),
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
             };
