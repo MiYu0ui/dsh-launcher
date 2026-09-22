@@ -107,33 +107,40 @@ namespace DshLauncher
 
         /// <summary>
         /// 在 releases JSON 里找出指定名字的资产并填进 rel（找不到就什么都不改）。
-        /// 做法是"定位 + 就近回溯"：GitHub 的资产对象里 name 一定排在 browser_download_url 之前，
-        /// 所以从每个下载地址往回找最近的 name 即可配对。700 / 900 是按键值长度取的经验窗口，
-        /// 字段顺序或长度大变时会配不上（那时要连着 UpdateCheck 一起改）。
+        /// 做法：先定位每个 browser_download_url，再回溯到**该资产对象的起点**
+        /// （资产对象以它自己的 url 字段打头，形如 .../releases/assets/），
+        /// 然后把 name 与 digest 的查找严格限制在这一段内 —— 不依赖任何固定字符窗口。
         /// </summary>
+        /// <remarks>
+        /// 这里原先用固定窗口："从 url 往回最多 700 字符找 name、再往后 900 字符找 digest"。
+        /// GitHub 给资产对象加上 uploader 子对象（20 多个 URL 字段）后，
+        /// name 到 browser_download_url 的距离涨到约 1420 字符，exe 资产于是永远配不上，
+        /// 「检查更新」会误报"该 Release 里没有 DSH Launcher.exe 资产"；
+        /// 而 digest 本来就在 url 之前、却按"向后找"处理，同样永远取不到值。
+        /// </remarks>
         private static void FindAsset(string json, string wantName, Release rel, bool isSha)
         {
+            const string AssetStart = "\"url\":\"https://api.github.com/repos/";
             int at = 0;
             while (true)
             {
                 int u = json.IndexOf("\"browser_download_url\"", at, StringComparison.Ordinal);
                 if (u < 0) return;
-                int namePos = json.LastIndexOf("\"name\"", u, Math.Min(u, 700), StringComparison.Ordinal);
-                if (namePos >= 0)
+
+                int left = json.LastIndexOf(AssetStart, u, StringComparison.Ordinal);
+                if (left < 0 || left >= u) { at = u + 24; continue; }
+                string body = json.Substring(left, u - left);   // 当前资产对象：起点 → url 之前
+
+                string name = Pick(body, "\"name\"\\s*:\\s*\"([^\"]+)\"");
+                // GitHub 上传资产时会把文件名里的空格换成点（"DSH Launcher.exe" → "DSH.Launcher.exe"），
+                // 所以比较时把 空格/点/下划线 全部抹掉再比，避免因改名匹配不上。
+                if (SameAsset(name, wantName))
                 {
-                    string name = Pick(json.Substring(namePos, u - namePos), "\"name\"\\s*:\\s*\"([^\"]+)\"");
-                    // GitHub 上传资产时会把文件名里的空格换成点（"DSH Launcher.exe" → "DSH.Launcher.exe"），
-                    // 所以比较时把 空格/点/下划线 全部抹掉再比，避免因改名匹配不上。
-                    if (SameAsset(name, wantName))
-                    {
-                        string url = Pick(json.Substring(u), "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"");
-                        int d = json.IndexOf("\"digest\"", u, StringComparison.Ordinal);
-                        string digest = "";
-                        if (d > 0 && d - u < 900) digest = Pick(json.Substring(d), "\"digest\"\\s*:\\s*\"([^\"]+)\"");
-                        if (isSha) { rel.ShaUrl = url; }
-                        else { rel.AssetUrl = url; rel.AssetName = name; rel.Digest = digest; }
-                        return;
-                    }
+                    string url = Pick(json.Substring(u), "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"");
+                    string digest = Pick(body, "\"digest\"\\s*:\\s*\"([^\"]+)\"");
+                    if (isSha) { rel.ShaUrl = url; }
+                    else { rel.AssetUrl = url; rel.AssetName = name; rel.Digest = digest; }
+                    return;
                 }
                 at = u + 24;
             }
