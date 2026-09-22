@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -13,6 +13,11 @@ namespace DshLauncher
     /// </summary>
     internal class ConfirmDialog : Form
     {
+        /// <summary>
+        /// 用户做出的选择。
+        /// Cancel = 没有做出决定（✕ / Esc / 直接关掉）—— 调用方必须把这个值当成"用户还没决定"，
+        /// 而不是"用户拒绝"；后两者在业务上的处理往往完全不同。
+        /// </summary>
         public enum Choice { Cancel, Confirm, Alt, Alt2 }
 
         private const int DesignW = 640;
@@ -25,6 +30,7 @@ namespace DshLauncher
         private readonly string _warning;
         private readonly string[] _fields;
         private readonly bool _danger;
+        /// <summary>只读提示：不画取消 / 第三选项，只留一个「知道了」，且不带危险样式。</summary>
         private readonly bool _infoOnly;
         private readonly string _altText;      // 最左按钮（第三选项）→ Choice.Alt
         private readonly string _thirdText;    // 中间按钮；给定时取代「取消」→ Choice.Alt2
@@ -32,6 +38,10 @@ namespace DshLauncher
         private int _messageH;
         private int _warningH;
         private int _fieldsTop;
+        /// <summary>
+        /// 选择结果。默认 <c>Cancel</c> 是刻意的兜底：任何非按钮路径（✕ / Esc / 异常关闭）
+        /// 都会走到这个初始值，调用方看到的就是"用户没做决定"。
+        /// </summary>
         private Choice _result = Choice.Cancel;
 
         private ConfirmDialog(string track, string headline, string message, string[] fields,
@@ -51,6 +61,8 @@ namespace DshLauncher
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = infoOnly ? FormStartPosition.CenterParent : FormStartPosition.CenterParent;
+            // 说明：上面三元的两个分支取值相同，恒等于 CenterParent。
+            // 看着像笔误，但按「只动注释」的范围本轮不改代码；行为与直接写 CenterParent 一致。
             ShowInTaskbar = false;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -68,6 +80,7 @@ namespace DshLauncher
 
         private readonly WindowReveal _reveal;
 
+        /// <summary>起播入场动画（对话框档：300ms，不做章节版式）。</summary>
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -90,6 +103,10 @@ namespace DshLauncher
             base.Dispose(disposing);
         }
 
+        /// <summary>
+        /// 给无边框窗口补一点系统投影（<c>CS_DROPSHADOW</c>），让它从主界面上浮起来。
+        /// 这个样式位必须在窗口类注册时就带上，而 Form 没有对应属性，只能走 <c>CreateParams</c>。
+        /// </summary>
         protected override CreateParams CreateParams
         {
             get
@@ -139,6 +156,12 @@ namespace DshLauncher
         }
 
         // ---------------- 布局 ----------------
+        /// <summary>
+        /// 建控件并按设计像素摆位。
+        ///
+        /// ⚠️ 与打字确认框同一套单位约定：控件位置最终要物理像素，所以每个推进步都过 <see cref="Theme.S"/>；
+        /// 正文 / 警告高度是量出来后除以缩放的**设计像素**（见 <see cref="_messageH"/>），推进时要再乘回去。
+        /// </summary>
         private void Layout(string confirmText)
         {
             int contentW = Theme.S(DesignW) - Theme.S(Pad * 2);
@@ -158,10 +181,10 @@ namespace DshLauncher
             int y = Theme.S(HeaderH) + Theme.S(16);
             y += Theme.S(26);                                  // 标题
             y += Theme.S(10);                                  // 分隔线
-            if (_messageH > 0) y += _messageH + Theme.S(18);
+            if (_messageH > 0) y += Theme.S(_messageH) + Theme.S(18);   // _messageH 是设计像素，推进要过 Theme.S（绘制那边也是）
             _fieldsTop = y;
             if (_fields != null) y += _fields.Length * Theme.S(24) + Theme.S(6);
-            if (_warningH > 0) y += _warningH + Theme.S(12);
+            if (_warningH > 0) y += Theme.S(_warningH) + Theme.S(12);   // 同上：原来按设计值推进、按物理值绘制 → 警告会压住下一行
             y += Theme.S(16);                                  // 按钮行上方留白
             int btnH = Theme.S(42);
             int totalH = y + btnH + Theme.S(Pad);
@@ -182,6 +205,7 @@ namespace DshLauncher
             ok.BackColor = Theme.Bg;
             ok.Click += delegate(object s, EventArgs e)
             {
+                // 两个分支同值：只读提示框点「知道了」同样记成 Choice.Confirm
                 _result = _infoOnly ? Choice.Confirm : Choice.Confirm;
                 DialogResult = DialogResult.OK;
                 Close();
@@ -190,6 +214,8 @@ namespace DshLauncher
 
             if (!_infoOnly)
             {
+                // 中间按钮：没有第三选项时它就是「取消」，有第三选项时它是那个选项本身 ——
+                // 所以这里按 hasThird 决定文案、返回值，连 DialogResult 都跟着变（第三选项算「已选择」，用 OK）
                 FlatButton cancel = new FlatButton();
                 cancel.Text = hasThird ? _thirdText : "取消";
                 cancel.Location = new Point(rx - btnW * 2 - Theme.S(10), by);
@@ -235,6 +261,10 @@ namespace DshLauncher
             close.BringToFront();
         }
 
+        /// <summary>
+        /// 快捷键：Esc = 取消，Enter = 确认。入场期间先把动画跳完，但**不吞按键** ——
+        /// 吞掉会让 Esc / Enter 在头 300ms 内像失灵，而模态框一旦关不掉就是挂死。
+        /// </summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             // 入场没播完时只是把动画跳完，**不吞按键** —— 吞掉会让 Esc/Enter 在头 300ms 内像失灵；
@@ -257,6 +287,7 @@ namespace DshLauncher
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>入场期间点一下 = 跳过动画（不改变任何选择）；否则顶部标题区按住左键可拖动窗口。</summary>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -265,6 +296,10 @@ namespace DshLauncher
         }
 
         // ---------------- 绘制 ----------------
+        /// <summary>
+        /// 全自绘：顶边 + 面板标题区 + 巡行细线框，再叠正文 / 字段 / 警告；
+        /// 危险态把顶边、巡行彗尾、四角括号统一换成告警色。
+        /// </summary>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;

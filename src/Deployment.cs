@@ -14,6 +14,8 @@ namespace DshLauncher
     /// <summary>部署步骤状态。</summary>
     internal enum StepState { Pending, Running, Done, Failed, Skipped }
 
+    /// <summary>部署面板上的一行步骤：标题 + 副标题 + 状态。</summary>
+    /// <remarks>索引固定（顺序由 Deployer 构造函数里的 Add() 决定）；Title 只在登记时写一次，运行期只改 State/Detail。</remarks>
     internal class DeployStep
     {
         public string Title = "";
@@ -30,16 +32,16 @@ namespace DshLauncher
         public bool NpxReady;
         public bool DshCached;        // 本地已有 DSH 缓存（= 部署过）
         public bool HomePresent;      // 存在 %USERPROFILE%\.dsh
-        public string NodeVersion = "";
-        public string NodePath = "";
-        public string DshEntry = "";
-        public string Workspace = "";
-        public bool WorkspaceExists;
+        public string NodeVersion = "";   // node --version 的原始输出（可能带 v 前缀，不做归一化）
+        public string NodePath = "";      // 实际用到的 node.exe 路径（配置指定或探测所得）
+        public string DshEntry = "";      // 缓存里 @deepseek-ai/dsh 的 bin.js（极速模式的入口）
+        public string Workspace = "";     // 来自配置的工作目录；cfg 为空时留空
+        public bool WorkspaceExists;      // 工作目录当前是否存在（不参与 NeedsDeploy 判定，缺失时由部署流程创建）
 
         public bool NeedsDeploy;      // 结论：需要进入自动部署
-        public string Headline = "";
-        public string Summary = "";
-        public readonly List<string> Missing = new List<string>();
+        public string Headline = "";  // 给界面用的一句话标题
+        public string Summary = "";   // 给界面/日志用的一句话结论
+        public readonly List<string> Missing = new List<string>();   // 缺失项清单，每条都是给人看的中文描述
 
         // ---- 部署第 1 步的系统兼容性判定（对齐旧脚本 Test-WindowsCompatibility）----
         public bool SysSupported = true;
@@ -53,8 +55,17 @@ namespace DshLauncher
     /// 部署检测：本机是否已经装好可用的 DSH。
     /// 判定标准对齐安装脚本 Test-NodeReady（node+npm+npx 且 22.19+ / 24+）与 DSH 缓存入口。
     /// </summary>
+    /// <remarks>本类只读不写：不安装、不改配置，检测结果交给调用方决定下一步；每项探测各自 try/catch，拿不到就按"不存在"处理。</remarks>
     internal static class Deployment
     {
+        /// <summary>环境体检的唯一入口：判断本机是否已有可用的 DSH 运行环境。</summary>
+        /// <param name="cfg">当前配置；不能为 null（除工作目录那一行外，后续 DshLocator 会直接解引用它）。</param>
+        /// <returns>体检结果；NeedsDeploy 为 true 时调用方应进入自动部署流程。</returns>
+        /// <remarks>
+        /// 每项探测各自 try/catch，探测失败按"不存在"处理 —— 不让体检本身把启动流程带崩。
+        /// 固定版本模式下会额外比对本地缓存里的版本，避免"版本错配却判定为无需部署"。
+        /// 排查/演示时可用环境变量 DSH_LAUNCHER_FORCE_DEPLOY=1 强制走一遍部署向导。
+        /// </remarks>
         public static DeployReport Check(AppConfig cfg)
         {
             DeployReport r = new DeployReport();
@@ -142,6 +153,8 @@ namespace DshLauncher
         }
 
         /// <summary>安装脚本的版本门槛：22.19+ 或 24+。</summary>
+        /// <param name="raw">node --version 的输出，允许带 v/V 前缀。</param>
+        /// <returns>达标为 true；版本串解析不出来时一律 false —— 宁可判为不达标，也不能把无法识别的版本当成可用。</returns>
         public static bool NodeVersionOk(string raw)
         {
             try
@@ -157,6 +170,8 @@ namespace DshLauncher
             catch { return false; }
         }
 
+        /// <summary>取子进程的版本输出：stdout 与 stderr 合并（不同发行版把版本打到哪个流并不一致）。</summary>
+        /// <returns>失败、超时或退出码非 0 时返回空串（调用方据此区分"没有 node"与"有 node 但读不到版本"）。</returns>
         private static string Query(string exe, string args)
         {
             try
@@ -174,15 +189,23 @@ namespace DshLauncher
     /// 环境检测 → 安装 Node.js（官方 MSI 校验 SHA-256 → npmmirror 镜像 → winget）→
     /// 准备工作目录 → 核验 DSH 版本与完整性 → 拉取到本地缓存 → 建快捷方式。
     /// </summary>
+    /// <remarks>
+    /// 步骤顺序由 Run() 的 &amp;&amp; 链决定，SetStep 的下标与之逐一对应（0..6）。
+    /// 注意：源码里方法的书写顺序与执行顺序并不一致（准备工作目录排在版本解析之前），
+    /// 调整步骤顺序时，构造函数的 Add() 次序、各 StepXxx 里的下标、Run() 的调用链必须一起改。
+    /// 整个流程跑在后台线程 "dsh-deploy" 上，进度通过 Log/Changed 事件回抛给界面。
+    /// </remarks>
     internal class Deployer
     {
         private readonly List<DeployStep> _steps = new List<DeployStep>();
-        private readonly object _gate = new object();
-        private Thread _thread;
-        private volatile bool _cancel;
+        private readonly object _gate = new object();   // 保护 _steps，以及 SetStep 里对 _detail 的更新
+        private Thread _thread;   // 部署线程 "dsh-deploy"（后台线程，进程退出时不会被它拦住）
+        private volatile bool _cancel;   // 界面线程写、部署线程读，故为 volatile
         private volatile bool _running;
 
+        /// <summary>日志事件（在部署线程上触发，订阅方要自己切回界面线程）。</summary>
         public event LogHandler Log;
+        /// <summary>步骤状态变化事件（同样在部署线程上，界面刷新需 BeginInvoke）。</summary>
         public event EventHandler Changed;
 
         public Deployer()
@@ -199,14 +222,19 @@ namespace DshLauncher
         /// <summary>供安装器等外部步骤上报日志（事件本身不能在类外触发）。</summary>
         public void Report(string message, LogLevel level) { Emit(message, level); }
 
+        /// <summary>部署线程是否在跑（Start 用它挡重复进入）。</summary>
         public bool Running { get { return _running; } }
+        /// <summary>是否已经请求取消（协作式，见 Cancel）。</summary>
         public bool CancelRequested { get { return _cancel; } }
 
+        /// <summary>步骤列表的快照副本：界面可以放心遍历，不会被部署线程的改动扰动。</summary>
         public List<DeployStep> Steps { get { lock (_gate) { return new List<DeployStep>(_steps); } } }
 
+        /// <summary>当前动作的一句话描述，界面的进度文案直接显示它。</summary>
         public string CurrentDetail { get { return _detail; } }
-        private volatile string _detail = "";
+        private volatile string _detail = "";   // 部署线程写、界面线程读，故为 volatile
 
+        /// <summary>完成度 0..1：Done 与 Skipped 都算完成，分母固定为全部步骤数。</summary>
         public double Progress
         {
             get
@@ -223,11 +251,14 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>流程是否已结束（成功、失败、取消都算结束）。</summary>
         public bool Finished { get { return _finished; } }
+        /// <summary>是否所有步骤都成功，且中途没有请求取消。</summary>
         public bool Succeeded { get { return _succeeded; } }
         private volatile bool _finished;
         private volatile bool _succeeded;
 
+        /// <summary>登记一个步骤。调用次序就是它的索引，仅供构造函数使用。</summary>
         private void Add(string title, string detail)
         {
             DeployStep s = new DeployStep();
@@ -236,6 +267,10 @@ namespace DshLauncher
             _steps.Add(s);
         }
 
+        /// <summary>
+        /// 更新某一步的状态。detail 传 null 或空串表示保留原副标题；
+        /// 下标越界直接忽略 —— 步骤表是静态的，越界属于代码写错，不该在这里抛异常打断部署。
+        /// </summary>
         private void SetStep(int index, StepState state, string detail)
         {
             lock (_gate)
@@ -245,9 +280,11 @@ namespace DshLauncher
                 if (!string.IsNullOrEmpty(detail)) _steps[index].Detail = detail;
                 if (state == StepState.Running) _detail = _steps[index].Title + " …";
             }
+            // 事件在锁外触发：订阅方（界面）会立刻回调 Steps/Progress，锁内触发会把这些读取挡在锁上
             Raise();
         }
 
+        /// <summary>上报日志：更新当前动作文案并转发给订阅方；订阅方抛异常只吞掉，不允许影响部署。</summary>
         private void Emit(string message, LogLevel level)
         {
             _detail = message;
@@ -256,12 +293,14 @@ namespace DshLauncher
             Raise();
         }
 
+        /// <summary>通知界面刷新；异常一并吞掉，界面出问题不能改写部署结论。</summary>
         private void Raise()
         {
             EventHandler h = Changed;
             if (h != null) { try { h(this, EventArgs.Empty); } catch { } }
         }
 
+        /// <summary>从头跑一次部署。已在运行时直接返回 —— 界面上连点「一键部署」不会起第二条线程。</summary>
         public void Start(AppConfig cfg)
         {
             if (_running) return;
@@ -276,8 +315,16 @@ namespace DshLauncher
             _thread.Start();
         }
 
+        /// <summary>
+        /// 请求取消。属于**协作式**取消：只在拉取步骤结束后与收尾判定处被检查，
+        /// 正在跑的 msiexec / winget 不会被中断（它们已经是独立进程，这里没有强杀路径）。
+        /// </summary>
         public void Cancel() { _cancel = true; }
 
+        /// <summary>
+        /// 部署主流程：各步骤用 &amp;&amp; 短路串联 —— 任一步返回 false 就地停止，后续步骤不再执行。
+        /// 无论成功失败，finally 里都会落定状态并给出最后一条结论日志。
+        /// </summary>
         private void Run(AppConfig cfg)
         {
             try
@@ -301,6 +348,7 @@ namespace DshLauncher
         }
 
         // ---- 1. 系统兼容性 ----
+        /// <summary>第 1 步：Windows 版本与位数门槛。不满足就地中止，后面几步没有意义。</summary>
         private bool StepSystem(AppConfig cfg)
         {
             SetStep(0, StepState.Running, null);
@@ -318,6 +366,10 @@ namespace DshLauncher
         }
 
         // ---- 2. 环境检测 ----
+        /// <summary>
+        /// 第 2 步：只体检、不下结论 —— 即使 Node 缺失或版本不达标也返回 true，
+        /// 把"装 Node"留给第 3 步的降级链，避免在这里过早中止整个部署。
+        /// </summary>
         private bool StepEnvironment(AppConfig cfg)
         {
             SetStep(1, StepState.Running, null);
@@ -334,6 +386,10 @@ namespace DshLauncher
         }
 
         // ---- 3. Node.js 安装 ----
+        /// <summary>
+        /// 第 3 步：三级降级链（官方 MSI → npmmirror → winget），每级之后都刷新本进程 PATH。
+        /// 三级全败才判失败，并顺手打开下载页让用户手动安装。
+        /// </summary>
         private bool StepNode(AppConfig cfg)
         {
             DeployReport r = Deployment.Check(cfg);
@@ -344,6 +400,8 @@ namespace DshLauncher
             }
 
             SetStep(2, StepState.Running, null);
+            // 每级之后都要刷 PATH：安装器改的是系统/用户级环境变量，当前进程读到的还是旧值，
+            // 不刷的话下一级的 IsReady 会一直判"没装好"，整条降级链等于白走。
             if (!NodeInstaller.InstallOfficial(cfg, this)) Emit("Node.js 官方源未完成，改用 npmmirror 镜像。", LogLevel.Warn);
             NodeRefreshPath();
             if (!NodeInstaller.IsReady(cfg)) { if (!NodeInstaller.InstallMirror(cfg, this)) Emit("npmmirror 镜像未完成，改用 winget。", LogLevel.Warn); }
@@ -369,6 +427,10 @@ namespace DshLauncher
         }
 
         /// <summary>按安装脚本刷新 PATH：补上常见 Node 安装目录。</summary>
+        /// <remarks>
+        /// 只改本进程的环境变量，不动系统/用户级设置 —— 装完立刻可用。
+        /// Program Files\nodejs 是官方 MSI 的落点，LocalApplicationData\Programs\nodejs 是用户级安装的落点。
+        /// </remarks>
         private static void NodeRefreshPath()
         {
             try
@@ -391,6 +453,7 @@ namespace DshLauncher
         }
 
         // ---- 5. 工作目录 ----
+        /// <summary>第 5 步：确保工作目录存在 —— 缺失就创建，建不出来才算这一步失败。</summary>
         private bool StepWorkspace(AppConfig cfg)
         {
             SetStep(4, StepState.Running, null);
@@ -419,9 +482,15 @@ namespace DshLauncher
         }
 
         // ---- 4. 版本与完整性 ----
+        // 第 4 步解析出的结果，第 6 步（预下载）直接复用：版本与下载源必须来自同一次解析，
+        // 否则中途源发生变化时，可能拉到一个和刚才核验结果对不上的包。
         private DshPackage _pkg;
         private string _registry;
 
+        /// <summary>
+        /// 第 4 步：定版本 —— 解析目标版本/下载源/integrity，并把结果写回配置。
+        /// 开了完整性核验却拿不到 integrity 时直接失败：宁可装不上，也不装一个无法核验的包。
+        /// </summary>
         private bool StepVersion(AppConfig cfg)
         {
             SetStep(3, StepState.Running, null);
@@ -460,9 +529,14 @@ namespace DshLauncher
         }
 
         // ---- 6. 预下载（带实时进度）----
+        /// <summary>
+        /// 第 6 步：用 npx 把 DSH 预下载到本地缓存（首次很慢，所以单独成步并带实时进度）。
+        /// 命令退出码为 0 不作数 —— 结束后必须真能在缓存里找到一份可用副本才算通过。
+        /// </summary>
         private bool StepFetch(AppConfig cfg)
         {
             SetStep(5, StepState.Running, null);
+            // 用副本做探测：下面要临时改 LaunchMode/Registry，不能污染用户那份配置
             AppConfig probe = Clone(cfg);
             if (!string.IsNullOrEmpty(_registry)) probe.Registry = _registry;
             probe.LaunchMode = "npx";
@@ -516,7 +590,7 @@ namespace DshLauncher
                     prevAt = DateTime.Now;
                 }
             });
-            ticker.IsBackground = true;
+            ticker.IsBackground = true;   // 后台线程：npx 结束后由 finally 里的 stopTicker 收尾，不阻塞部署线程
             ticker.Start();
 
             DateTime started = DateTime.Now;
@@ -556,6 +630,7 @@ namespace DshLauncher
         }
 
         // ---- 7. 快捷方式 ----
+        /// <summary>第 7 步：建桌面与开始菜单快捷方式 —— 两处都成功才算这一步成功。</summary>
         private bool StepShortcuts(AppConfig cfg)
         {
             SetStep(6, StepState.Running, null);
@@ -580,12 +655,18 @@ namespace DshLauncher
             return false;
         }
 
+        /// <summary>把多行输出压成一行并截断（步骤副标题与日志都只占一行，不能带换行）。</summary>
         private static string Short(string s)
         {
             s = (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
             return s.Length <= 120 ? s : s.Substring(0, 120) + "…";
         }
 
+        /// <summary>
+        /// 复制一份探测用配置（只带"找 node / 起 npx"需要的字段）。
+        /// 部署过程中要临时改 LaunchMode/Registry 去试跑，不能动用户那一份。
+        /// </summary>
+        /// <remarks>以后新增与定位 node / 启动 npx 相关的配置字段时，记得同步加进来。</remarks>
         private static AppConfig Clone(AppConfig src)
         {
             AppConfig c = new AppConfig();
@@ -606,6 +687,7 @@ namespace DshLauncher
     /// </summary>
     internal static class NodeInstaller
     {
+        // 两个源的版本清单地址（结构相同，解析代码共用一份）
         private const string OfficialIndex = "https://nodejs.org/dist/index.json";
         private const string MirrorIndex = "https://registry.npmmirror.com/-/binary/node/index.json";
 
@@ -619,11 +701,13 @@ namespace DshLauncher
             return r.NodeReady && r.NpmReady;
         }
 
+        /// <summary>第一级：从 nodejs.org 取版本清单与安装包，校验值也取官方那份。</summary>
         public static bool InstallOfficial(AppConfig cfg, Deployer d)
         {
             return InstallFrom(cfg, d, OfficialIndex, "nodejs.org", new string[] { "https://nodejs.org/dist/" });
         }
 
+        /// <summary>第二级：走 npmmirror 镜像（nodejs.org 不可达时的主力通道）。</summary>
         public static bool InstallMirror(AppConfig cfg, Deployer d)
         {
             // 镜像下 MSI；校验值**优先取镜像自己那份 SHASUMS256**（实测与官方逐字节一致），
@@ -635,6 +719,15 @@ namespace DshLauncher
             });
         }
 
+        /// <summary>
+        /// 从指定源安装 Node.js：取版本清单 → 挑 LTS → 下载 MSI 到临时目录 → 校验 SHA-256 → msiexec 静默安装。
+        /// </summary>
+        /// <param name="cfg">当前配置；原样透传给 NetFetch 的取文本/下载接口。</param>
+        /// <param name="d">部署器，用来上报下载与校验进度。</param>
+        /// <param name="indexUrl">版本清单地址（官方源或镜像源）。</param>
+        /// <param name="sourceName">源的中文名，仅用于日志文案。</param>
+        /// <param name="checksumBases">SHASUMS256.txt 的来源基址，**按优先级排列**，先取到的先用。</param>
+        /// <returns>任何一步失败都返回 false 并如实上报；校验不通过时会删掉已下载的安装包。</returns>
         private static bool InstallFrom(AppConfig cfg, Deployer d, string indexUrl, string sourceName, string[] checksumBases)
         {
             try
@@ -688,6 +781,10 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>
+        /// 第三级：用 winget 安装 LTS（OpenJS.NodeJS.LTS）。
+        /// 需要 UAC 授权；用户在授权框上点"否"会以异常形式失败，由调用方判为这一级没成功。
+        /// </summary>
         public static bool InstallWinget(Deployer d)
         {
             try
@@ -712,6 +809,8 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>静默安装已经校验过的 MSI（/passive：显示进度条但不询问选项）。</summary>
+        /// <remarks>0 / 1641 / 3010 都算成功：1641 = 安装完成并已启动重启，3010 = 装好了但需要重启。</remarks>
         private static bool RunInstaller(string msiPath, Deployer d)
         {
             try
@@ -737,6 +836,11 @@ namespace DshLauncher
         }
 
         /// <summary>从 Node 官方 index.json 里挑最新的 LTS（要求 major ≥ 24 且有 win-x64-msi）。</summary>
+        /// <returns>形如 "v24.4.1" 的版本串；没有合格条目时返回 null。</returns>
+        /// <remarks>
+        /// 用正则逐条粗解 JSON（本工程不引 JSON 依赖）："lts":false 的 Current 线与缺少
+        /// win-x64-msi 的条目一律跳过 —— 挑出一个装不上的版本没有意义。
+        /// </remarks>
         public static string PickLtsVersion(string json)
         {
             if (string.IsNullOrEmpty(json)) return null;
@@ -758,6 +862,8 @@ namespace DshLauncher
             return best;
         }
 
+        /// <summary>从 SHASUMS256.txt 里取指定文件的哈希（每行形如「哈希 + 两个空格 + 文件名」）。</summary>
+        /// <returns>哈希串（大写十六进制）；找不到返回 null。</returns>
         public static string FindChecksum(string shasums, string fileName)
         {
             if (string.IsNullOrEmpty(shasums)) return null;
@@ -773,6 +879,7 @@ namespace DshLauncher
             return null;
         }
 
+        /// <summary>取文本（自签 UA，超时同时用于连接与读写）。注意：本类里已无调用点，取文本/下载统一走 NetFetch。</summary>
         private static string HttpGetString(string url, int timeoutMs)
         {
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
@@ -785,6 +892,7 @@ namespace DshLauncher
                 return sr.ReadToEnd();
         }
 
+        /// <summary>带进度回调的下载（400ms 节流，避免刷屏）。注意：本类里已无调用点，下载统一走 NetFetch。</summary>
         private static void DownloadFile(string url, string dest, Deployer d)
         {
             using (WebClient wc = new WebClient())
@@ -802,6 +910,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>算文件的 SHA-256，返回大写十六进制（与 SHASUMS256.txt 的写法一致，可直接比对）。</summary>
         private static string Sha256(string path)
         {
             using (SHA256 sha = SHA256.Create())
@@ -818,6 +927,15 @@ namespace DshLauncher
     /// <summary>下载源核验：npm view 指定版本并比对固定 integrity（安装脚本同款做法）。</summary>
     internal static class SourceVerify
     {
+        /// <summary>
+        /// 按"配置里的源 → npm 官方源"的顺序核验固定版本，返回第一个通过的源。
+        /// 找不到 npm 时直接判失败：这一步本身就是核验，跳过等于没核验。
+        /// </summary>
+        /// <param name="cfg">当前配置：取首选下载源、固定版本与固定 integrity，以及 node / npm 的位置。</param>
+        /// <param name="log">日志回调；允许为 null（此时全程静默）。</param>
+        /// <param name="registry">输出的可用下载源；未通过时保持入参里的原值。</param>
+        /// <returns>通过核验为 true。</returns>
+        /// <remarks>启动期还有一份同类核验（DshServer.VerifySource），两者在"找不到 npm"时的策略不同：那边是跳过核验继续启动。</remarks>
         public static bool Resolve(AppConfig cfg, LogHandler log, out string registry)
         {
             registry = cfg.Registry;
@@ -880,6 +998,8 @@ namespace DshLauncher
             return false;
         }
 
+        /// <summary>从 npm --json 的输出里取字段（够用的手写解析，不引 JSON 依赖）。</summary>
+        /// <returns>字符串值去掉引号后返回，标量原样返回；键不存在或输入为空时返回 null。</returns>
         public static string JsonField(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return null;

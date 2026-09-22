@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -15,24 +15,36 @@ namespace DshLauncher
     internal class LinkTransition : Form
     {
         // 时间轴（秒）
+        /// <summary>授权环双弧从上下各自闭合所需时长。</summary>
         private const double TRing = 0.45;     // 双弧闭合
+        /// <summary>中心标志开始弹入的时刻（比环闭合早一点，留出重叠）。</summary>
         private const double TMark = 0.25;     // 中心标志出现
         private const double TSweep = 0.50;    // 黑条开始扫过
         private const double TSweepEnd = 0.95;
+        /// <remarks>
+        /// 时间轴的读法：各元素按上面的时刻错峰起笔，<c>TEnd</c> 是内容结束、之后进入 <c>TFade</c> 段淡出，
+        /// 所以整张卡片活到 <c>TEnd + TFade</c>（≈1.7s）才关闭。<c>TEnd</c> 之前的点击 / 按键可以跳过。
+        /// </remarks>
         private const double THandoff = 1.15;  // 可选：若给了交接回调，在此刻触发（接入过渡不给，改为播完再打开）
         private const double TEnd = 1.30;      // 内容结束
         private const double TFade = 0.40;     // 淡出
 
+        /// <summary>帧定时器（25ms ≈ 40fps）：动画期间常驻，卡片关闭即随 Dispose 停掉。</summary>
         private readonly Timer _timer;
+        /// <summary>单调计时基准（比墙钟可靠，不受系统时间调整影响）。</summary>
         private readonly Stopwatch _clock = new Stopwatch();
         private readonly string _displayUrl;
+        /// <summary>交接动作（真正去打开浏览器）；为 null 表示由调用方在卡片播完后自己开。</summary>
         private readonly Action _handoff;
         private readonly Pen _arcPen;
         private readonly Pen _barFill;
         private readonly Pen _barTrack;
         private readonly Pen _wave;
+        /// <summary>交接回调是否已经触发过（只触发一次的关键）。</summary>
         private bool _handedOff;
+        /// <summary>是否已经发起关闭：时间轴会被多个 Tick 走到，这里防止重复 Close。</summary>
         private bool _closing;
+        /// <summary>跳过用的时间偏移（秒）。把 <see cref="Now"/> 直接推到终点即可，不做任何状态切换。</summary>
         private double _timeShift;
 
         private string _title = "LINK / ESTABLISHED";
@@ -83,7 +95,7 @@ namespace DshLauncher
             _timer.Start();
         }
 
-        /// <summary>把卡片精确铺到宿主窗口的客户区上。</summary>
+        /// <summary>把卡片精确铺到宿主窗口的客户区上（用屏幕坐标换算，窗口挪过也照样对齐）。</summary>
         public void CoverOwner(Form owner)
         {
             if (owner == null) return;
@@ -92,8 +104,10 @@ namespace DshLauncher
             Location = new Point(area.Left, area.Top);
         }
 
+        /// <summary>当前动画时间（秒）：真实流逝 + 跳过偏移，等价于一条可以任意快进的播放头。</summary>
         private double Now { get { return _clock.Elapsed.TotalSeconds + _timeShift; } }
 
+        /// <summary>每帧推一次：先看要不要交接 / 收场，再按两条曲线算不透明度。</summary>
         private void Tick()
         {
             double now = Now;
@@ -114,16 +128,30 @@ namespace DshLauncher
             Invalidate();
         }
 
+        /// <summary>
+        /// 跳过动画：把播放头直接推到内容结束（<c>TEnd</c>），剩下的淡出照常播完。
+        /// </summary>
+        /// <remarks>
+        /// 只加偏移、不动 <c>_clock</c>，所以跳完还会自然走完 <c>TFade</c>；
+        /// 已在 <c>TEnd</c> 之后就什么都不做（不会把已结束的动画"倒回来"）。
+        /// </remarks>
         private void Skip()
         {
             double now = Now;
             if (now < TEnd) _timeShift += TEnd - now;
         }
 
+        /// <summary>显示后抢一次前台焦点（卡片是顶层无边框窗，不激活就收不到按键）。</summary>
         protected override void OnShown(EventArgs e) { base.OnShown(e); Activate(); }
+        /// <summary>点一下就跳过：接管界面期间用户唯一的操作就是"别等了"。</summary>
         protected override void OnMouseDown(MouseEventArgs e) { Skip(); base.OnMouseDown(e); }
+        /// <summary>按键同样跳过；事件继续下传，不吞任何键。</summary>
         protected override void OnKeyDown(KeyEventArgs e) { Skip(); base.OnKeyDown(e); }
 
+        /// <summary>
+        /// 整张卡片自绘：授权环闭合 → 琥珀刻度点 → 中心标志弹入 → 文案 / 进度线 → 黑条扫过 → 冲击波。
+        /// 全程只读 <see cref="Now"/>，所以跳过后下一帧自然就是终态。
+        /// </summary>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -200,17 +228,17 @@ namespace DshLauncher
                 int alpha = (int)(255 * textP);
                 Theme.DrawTrackedCenter(g, _headline, Theme.FontTechBold,
                     new Rectangle(0, (int)(h * 0.62f), w, Theme.S(22)),
-                    Color.FromArgb(alpha, Theme.Ink), Theme.SF(3.0f));
+                    Theme.Mix(Theme.Bg, Theme.Ink, textP), Theme.SF(3.0f));
                 if (_displayUrl.Length > 0)
                 {
                     TextRenderer.DrawText(g, _displayUrl, Theme.FontMono,
-                        new Rectangle(0, (int)(h * 0.68f), w, Theme.S(20)), Color.FromArgb(alpha, Theme.Amber),
+                        new Rectangle(0, (int)(h * 0.68f), w, Theme.S(20)), Theme.Mix(Theme.Bg, Theme.Amber, textP),
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
                 else if (_sub.Length > 0)
                 {
                     TextRenderer.DrawText(g, _sub, Theme.FontSmall,
-                        new Rectangle(Theme.S(40), (int)(h * 0.68f), w - Theme.S(80), Theme.S(20)), Color.FromArgb(alpha, Theme.Sub),
+                        new Rectangle(Theme.S(40), (int)(h * 0.68f), w - Theme.S(80), Theme.S(20)), Theme.Mix(Theme.Bg, Theme.Sub, textP),
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
                 }
             }
@@ -250,7 +278,7 @@ namespace DshLauncher
                 int alpha = (int)(200 * (1.0 - p));
                 if (alpha > 3)
                 {
-                    _wave.Color = Color.FromArgb(alpha, Theme.Green);
+                    _wave.Color = Theme.Mix(Theme.Bg, Theme.Green, textP);
                     g.DrawEllipse(_wave, cx - rr, cy - rr, rr * 2, rr * 2);
                 }
             }
@@ -258,6 +286,7 @@ namespace DshLauncher
             base.OnPaint(e);
         }
 
+        /// <summary>按进度 p 取前若干个字符 —— 逐字擦入的手动截断，与 Theme 那套一样不能用 SetClip。</summary>
         private static string Clip(string text, double p)
         {
             int n = (int)Math.Round(text.Length * Math.Min(1.0, Math.Max(0.0, p)));
@@ -278,6 +307,7 @@ namespace DshLauncher
             return 1.0 + c3 * q * q * q + c1 * q * q;
         }
 
+        /// <summary>停表并释放四支画笔（本卡片是纯自绘，画笔在构造时创建、随窗体销毁）。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing)

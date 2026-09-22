@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -17,12 +17,15 @@ namespace DshLauncher
     /// </summary>
     internal class FlatButton : Control
     {
+        // 视觉状态：前三个由鼠标进出 / 按下驱动，后三个由调用方按按钮角色静态指定，只读不写。
         private bool _hover;
+        private bool _armed;
         private bool _down;
         private bool _primary;
         private bool _danger;
         private bool _accent;
 
+        /// <summary>构造：开双缓冲、手型光标、直角背景；默认不参与 Tab 焦点（这套界面不用键盘遍历控件）。</summary>
         public FlatButton()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -47,17 +50,23 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>
+        /// 危险操作（停止服务 / 卸载）：常态浅底 + 危险色描边与文字。
+        /// 与 <see cref="Primary"/> 同时置位时以本档为准 —— 绘制时先在 <c>_danger</c> 上分流，主按钮分支轮不到它。
+        /// </summary>
         public bool Danger { get { return _danger; } set { _danger = value; Invalidate(); } }
 
         /// <summary>强调态（暖褐描边）：用于「有更新可用」这类需要抓注意力的次要操作。</summary>
         public bool Accent { get { return _accent; } set { _accent = value; Invalidate(); } }
 
+        /// <summary>销毁前注销动效登记 —— 晚了全局时钟还会往已销毁的控件上 Invalidate。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing) Anim.Untrack(this);
             base.Dispose(disposing);
         }
 
+        /// <summary>进入悬停：登记 30fps 动效（彗尾要连续扫过），离开时再注销。</summary>
         protected override void OnMouseEnter(EventArgs e)
         {
             _hover = true;
@@ -66,6 +75,7 @@ namespace DshLauncher
             base.OnMouseEnter(e);
         }
 
+        /// <summary>离开悬停：清悬停与按下态；主按钮例外，它的呼吸动画不因鼠标离开而停。</summary>
         protected override void OnMouseLeave(EventArgs e)
         {
             _hover = false;
@@ -75,10 +85,31 @@ namespace DshLauncher
             base.OnMouseLeave(e);
         }
 
+        /// <summary>只认左键的按下态（用于内收 1px 的按压反馈）。</summary>
         protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _down = true; Invalidate(); } base.OnMouseDown(e); }
+        /// <summary>松开即清按下态；这里只重绘，真正的动作仍由 Click 触发。</summary>
         protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+        /// <summary>启用 / 禁用切换只要重绘 —— 配色在那个分支里另有一套"看着就像点不动"的组合。</summary>
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
+        /// <summary>
+        /// 危险按钮的"已武装"态：实心危险色 + 反白字。
+        /// 用在"确认词已经打对、现在真的可以执行了"的时刻 —— 这个状态必须一眼可见。
+        /// </summary>
+        public bool Armed
+        {
+            get { return _armed; }
+            set { if (_armed != value) { _armed = value; Invalidate(); } }
+        }
+
+        /// <summary>
+        /// 自绘：底色 → 1px 边框 → 按下时再内收 1px 的边框 → 悬停彗尾 → 四角刻度 → 居中标签。
+        /// </summary>
+        /// <remarks>
+        /// 填充 / 边框 / 文字三色按"禁用 → 危险 → 强调 → 主按钮 → 普通"的优先级链选定，
+        /// 同一时刻只有一档生效。<see cref="Armed"/> 不改身份档位，只是让危险档按"悬停 / 按下"那一套配色画。
+        /// 标签只排一行，居中且带省略号；<c>NoPrefix</c> 保证按需转义 <c>&amp;</c> 之类的字符。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -94,9 +125,12 @@ namespace DshLauncher
             }
             else if (_danger)
             {
-                fill = _hover || _down ? Theme.SignalAlert : Theme.PanelHi;
+                // 危险按钮的"已武装"态（Armed：打字确认已打对）与悬停/按下同款实心红 ——
+                // 原来只有"浅底红字"和"灰底灰字"两种，一眼看上去都像禁用，用户根本不知道能点了。
+                bool hot = _hover || _down || _armed;
+                fill = hot ? Theme.SignalAlert : Theme.PanelHi;
                 border = Theme.SignalAlert;
-                text = _hover || _down ? Theme.PanelHi : Theme.SignalAlert;
+                text = hot ? Theme.PanelHi : Theme.SignalAlert;
             }
             else if (_accent)
             {

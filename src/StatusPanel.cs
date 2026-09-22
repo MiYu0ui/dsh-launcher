@@ -21,8 +21,10 @@ namespace DshLauncher
         private double _headlineBorn;
         private double _urlBorn;
 
+        /// <summary>在服务地址那一行上单击时触发（只在 <c>_urlRect</c> 命中且有地址时才会发出）。</summary>
         public event EventHandler UrlClicked;
 
+        /// <summary>构造：开双缓冲并登记 30fps 动效 —— 面板从不真正静止（边框在呼吸、信号条在脉动）。</summary>
         public StatusPanel()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -31,6 +33,18 @@ namespace DshLauncher
             Anim.Track(this, 1);
         }
 
+        /// <summary>刷新面板显示的全部内容，并据此调整刷新率。</summary>
+        /// <param name="track">左上角的轨道标注行（宽字距小字）。</param>
+        /// <param name="headline">状态标题；值变了会记下时刻，让它重新从左往右扫入一次。</param>
+        /// <param name="sub">标题下的一行说明；null 按空串处理。</param>
+        /// <param name="signal">状态色，同时决定标题 / 信号条 / 彗尾的颜色与刷新率。</param>
+        /// <param name="workspace">工作目录（只显示、不可点）；null 按空串处理。</param>
+        /// <param name="url">服务地址；它变化时同样重新扫入，空串表示还没起来，不响应点击。</param>
+        /// <remarks>
+        /// 自适应帧率：<see cref="Theme.SignalBusy"/>（接入中）与 <see cref="Theme.SignalAlert"/>（异常）按 30fps，
+        /// 其余状态降到约 10fps —— 静态界面不该白烧 CPU。判断只看 <paramref name="signal"/>，
+        /// 所以调用方换状态时务必把颜色一起换掉，否则刷新率会留在旧档。
+        /// </remarks>
         public void SetState(string track, string headline, string sub, Color signal, string workspace, string url)
         {
             _track = track;
@@ -47,6 +61,7 @@ namespace DshLauncher
             Invalidate();
         }
 
+        /// <summary>销毁前注销动效登记，免得全局时钟继续往已销毁的控件上发重绘。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing) Anim.Untrack(this);
@@ -75,12 +90,14 @@ namespace DshLauncher
                 g.DrawLine(p, cx, rect.Y + 2, cx, rect.Bottom - 2);
         }
 
+        /// <summary>指针在服务地址那一行上（且确实有地址）时变手型，否则恢复默认。</summary>
         protected override void OnMouseMove(MouseEventArgs e)
         {
             Cursor = (_urlRect.Contains(e.Location) && _url.Length > 0) ? Cursors.Hand : Cursors.Default;
             base.OnMouseMove(e);
         }
 
+        /// <summary>点中服务地址那一行就发 <see cref="UrlClicked"/>，由外层去打开浏览器。</summary>
         protected override void OnMouseClick(MouseEventArgs e)
         {
             if (_urlRect.Contains(e.Location) && _url.Length > 0)
@@ -91,6 +108,11 @@ namespace DshLauncher
             base.OnMouseClick(e);
         }
 
+        /// <summary>自绘：呼吸细线框 + 左侧信号条 + 轨道标注行 + 状态标题 + 两行字段。</summary>
+        /// <remarks>
+        /// 纵向位置全是设计像素、经 <see cref="Theme.S"/> 缩放后落笔，改版式时几处 y 值要对齐着改。
+        /// 工作目录的 <c>born</c> 传 0，含义是"不播放扫入、直接整行显示"。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -132,6 +154,11 @@ namespace DshLauncher
                                  _url.Length > 0 ? Theme.Amber : Theme.SignalIdle, _urlBorn);
         }
 
+        /// <summary>画一行"标注 + 值"：左侧宽字距小字标注，右侧等宽字体的值。</summary>
+        /// <returns>
+        /// 值所在的可点击矩形（服务地址那一行靠它判断鼠标是否落在链接上）；
+        /// 值为空串时返回 <see cref="Rectangle.Empty"/>，于是这一行既不变手型也点不动。
+        /// </returns>
         private Rectangle DrawField(Graphics g, string label, string value, int x, int y, Color valueColor, double born)
         {
             Theme.DrawTracked(g, label, Theme.FontMonoSmall, x, y + Theme.S(3), Theme.Sub, Theme.SF(1.2f));

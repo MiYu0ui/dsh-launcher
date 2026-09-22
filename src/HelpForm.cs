@@ -12,6 +12,8 @@ namespace DshLauncher
     /// </summary>
     internal class HelpForm : Form
     {
+        // 版式基准（设计像素）：实际像素 = 设计值 × Theme 的缩放系数（Theme.S / Theme.SF），
+        // 下面的坐标一律写设计值，别再乘一遍缩放。
         private const int DesignW = 900;
         private const int DesignH = 620;
         private const int PadX = 30;
@@ -19,19 +21,27 @@ namespace DshLauncher
         private const int ListW = 312;
         private const int RowH = 24;
 
-        private readonly WindowReveal _reveal;
-        private readonly List<HelpTopic> _topics = HelpTopics.All;
-        private readonly List<string> _groups = HelpTopics.Groups();
+        private readonly WindowReveal _reveal;                          // 只管时间的入场/退场驱动器，画法在 OnPaint 这边
+        private readonly List<HelpTopic> _topics = HelpTopics.All;       // 主题数据（静态缓存的纯数据，只读）
+        private readonly List<string> _groups = HelpTopics.Groups();     // 分组名，顺序 = 主题首次出现的顺序
 
-        private int _selected;
+        private int _selected;          // 选中主题在 _topics 里的下标
         private int _listScroll;        // 目录滚动偏移（设计像素）
-        private int _hoverRow = -1;
+        private int _hoverRow = -1;     // 悬停的行号（行 = 分组标题与主题摊平后的序号），-1 = 不在列表上
         private FlatButton _btnDetail;
         private FlatButton _btnClose;
 
         /// <summary>某一行对应的主题下标；-1 = 这一行是分组标题。行号 → 主题下标。</summary>
         private readonly List<int> _rowTopic = new List<int>();
 
+        /// <summary>
+        /// 建帮助（二级界面）：先起入场驱动器，再搭界面与目录行。
+        /// </summary>
+        /// <remarks>
+        /// 驱动器必须在窗口句柄创建之前构造 —— 它要靠 <c>AllowTransparency</c> + <c>Opacity = 0</c>
+        /// 让窗口隐形就位，句柄建好之后再改透明度会触发句柄重建。
+        /// 界面的内容全部来自 <see cref="HelpTopics"/>（纯数据），本类只负责排版与交互。
+        /// </remarks>
         public HelpForm()
         {
             _reveal = new WindowReveal(this, WindowReveal.Level, false);
@@ -39,6 +49,15 @@ namespace DshLauncher
             BuildRows();
         }
 
+        /// <summary>
+        /// 搭界面：固定 900 设计宽，高度按屏幕工作区收缩。
+        /// </summary>
+        /// <remarks>
+        /// 高度有两套基准，改的时候别混：窗口客户区用收缩后的 <c>designH</c>，
+        /// 而底部按钮一律按设计高 <c>DesignH</c> 定位 —— 窗口被压矮时按钮会落到可视区之外，
+        /// 靠 <c>AutoScroll</c> 滚出来（这也是本窗唯一需要 AutoScroll 的地方）。
+        /// 章节锚点 96 用设计像素登记，与 OnPaint 里画章节头的位置一一对应。
+        /// </remarks>
         private void BuildUi()
         {
             SuspendLayout();
@@ -53,11 +72,13 @@ namespace DshLauncher
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             AutoScaleMode = AutoScaleMode.None;
-            KeyPreview = true;
+            KeyPreview = true;      // 键盘统一交给 ProcessCmdKey：方向键选主题、Enter 进详情、Esc 返回
 
-            int designH = DesignH;
+            int designH = DesignH;      // 收缩后的客户区高（只有缩不下时才开 AutoScroll）
             try
             {
+                // 屏幕工作区（设备像素）换算回设计像素，再留 24 设计像素余量。
+                // 太矮（不到 420）就不缩了 —— 再缩目录只剩两三行，不如保持原尺寸让用户滚。
                 int fit = (int)Math.Floor(Screen.PrimaryScreen.WorkingArea.Height / (double)(Theme.Scale <= 0f ? 1f : Theme.Scale)) - 24;
                 if (fit > 420 && fit < designH) { designH = fit; AutoScroll = true; }
             }
@@ -98,6 +119,11 @@ namespace DshLauncher
         }
 
         /// <summary>把主题按分组摊平成"行"：分组标题行 + 若干主题行。</summary>
+        /// <remarks>
+        /// 行序决定目录的显示顺序：组按 <c>_groups</c> 的顺序，组内按主题在 <c>_topics</c> 里的声明顺序。
+        /// 选中、悬停、滚动全都以**行号**为单位，所以要调整目录顺序只需要动这里；
+        /// 分组标题行记 -1，移动选择时会被跳过。
+        /// </remarks>
         private void BuildRows()
         {
             _rowTopic.Clear();
@@ -109,24 +135,46 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>窗口显示之后再起入场动画。</summary>
+        /// <remarks>
+        /// 顺序不能反过来：<c>BeginEnter</c> 要拿窗口当前的位置当位移基准（先下沉再升上来），
+        /// 而窗口没显示时那个位置还没定下来。
+        /// </remarks>
+        /// <param name="e">事件参数，未使用。</param>
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             if (_reveal != null) _reveal.BeginEnter();
         }
 
+        /// <summary>关闭前先让驱动器播完退场。</summary>
+        /// <remarks>
+        /// <c>InterceptClose</c> 只在第一次关闭时接管（返回 true 时本方法立即 return，这次关闭被取消）；
+        /// 退场途中再点一次关闭就会真正放行 —— 这个"只拦一次"是有意的，保证窗口永远关得掉。
+        /// </remarks>
+        /// <param name="e">关闭参数；被接管时驱动器会把它置为 Cancel。</param>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_reveal != null && _reveal.InterceptClose(e)) return;
             base.OnFormClosing(e);
         }
 
+        /// <summary>释放入场驱动器（它自己持有一个 Timer）。</summary>
+        /// <param name="disposing">true = 走托管释放路径；只有这种情形才需要释放驱动器。</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing && _reveal != null) _reveal.Dispose();
             base.Dispose(disposing);
         }
 
+        /// <summary>本窗的全部键盘操作（窗口没有可聚焦的输入控件，所以在这里统一处理）。</summary>
+        /// <remarks>
+        /// 第一分支是"入场期间按任意键先跳过动画"：<c>Skip</c> 之后 <c>Busy</c> 立刻变 false，
+        /// 所以只有入场中的第一次按键会被吃掉，之后的按键照常生效 —— 不会把方向键/Esc 一直吞掉。
+        /// </remarks>
+        /// <param name="msg">消息引用，原样透传给基类。</param>
+        /// <param name="keyData">按键；方向键与 PageUp/PageDown 移动选择，Enter 进详情，Esc 关闭。</param>
+        /// <returns>true = 已处理，不再往下传。</returns>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return true; }
@@ -139,6 +187,13 @@ namespace DshLauncher
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>把选择上下移动若干行。</summary>
+        /// <remarks>
+        /// 先夹到 [0, 行数-1]，再沿步进方向跳过 <c>-1</c> 的分组标题行。
+        /// 跳过的方向跟着 <paramref name="step"/> 走，所以 PageDown 落点靠后、PageUp 落点靠前，
+        /// 不会把选择卡在分组标题上。
+        /// </remarks>
+        /// <param name="step">行数增量（±1 为单行，±5 为翻页）。</param>
         private void Move(int step)
         {
             int row = RowOfTopic(_selected) + step;
@@ -150,15 +205,27 @@ namespace DshLauncher
             Invalidate();
         }
 
+        /// <summary>主题下标反查行号。</summary>
+        /// <param name="topic">主题在 <c>_topics</c> 里的下标。</param>
+        /// <returns>对应的行号；查不到时返回 0（当成首行，免得移动选择时被卡住）。</returns>
         private int RowOfTopic(int topic)
         {
             for (int i = 0; i < _rowTopic.Count; i++) if (_rowTopic[i] == topic) return i;
             return 0;
         }
 
+        // 目录可视区（设计像素）：上边在章节头之下，下边给底部按钮行让位。
+        /// <summary>目录列表的上边界（设计像素）。</summary>
         private int ListTop { get { return Theme.S(122); } }
+        /// <summary>目录列表的下边界（设计像素）：按设计高算，窗口被压矮时可视区会小于它。</summary>
         private int ListBottom { get { return Theme.S(DesignH - 84); } }
 
+        /// <summary>把某一行滚进可视区（只调滚动量，重绘由调用方负责）。</summary>
+        /// <remarks>
+        /// 只夹下界不夹上界：滚动量滚过头时下面的绘制端只画"完整落在面板内"的行，
+        /// 最坏就是末尾留白，而上界由 <c>OnMouseWheel</c> 负责夹住。
+        /// </remarks>
+        /// <param name="row">目标行号。</param>
         private void EnsureVisible(int row)
         {
             int y = row * Theme.S(RowH) - _listScroll;
@@ -168,6 +235,9 @@ namespace DshLauncher
             if (_listScroll < 0) _listScroll = 0;
         }
 
+        /// <summary>滚轮滚动目录。</summary>
+        /// <remarks>一格滚轮（Delta ±120）滚两行；上界在这里夹住，下界夹 0。</remarks>
+        /// <param name="e">滚轮参数，只用 Delta。</param>
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
@@ -178,6 +248,8 @@ namespace DshLauncher
             Invalidate();
         }
 
+        /// <summary>更新悬停行 —— 行号真的变了才重绘，鼠标在列表上滑动时不会每像素都刷一遍。</summary>
+        /// <param name="e">鼠标参数，只用 Location。</param>
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
@@ -185,12 +257,18 @@ namespace DshLauncher
             if (row != _hoverRow) { _hoverRow = row; Invalidate(); }
         }
 
+        /// <summary>鼠标离开窗体：清掉悬停行（不然会留着一行高亮）。</summary>
+        /// <param name="e">事件参数，未使用。</param>
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
             if (_hoverRow != -1) { _hoverRow = -1; Invalidate(); }
         }
 
+        /// <summary>命中测试：屏幕坐标 → 行号。</summary>
+        /// <remarks>先判是否落在目录面板的矩形内（横向按 PadX..PadX+ListW），再按 y 反算行号并加回滚动偏移。</remarks>
+        /// <param name="p">客户区坐标。</param>
+        /// <returns>行号；不在列表上或超出总行数时返回 -1。</returns>
         private int RowAt(Point p)
         {
             if (p.X < Theme.S(PadX) || p.X > Theme.S(PadX + ListW)) return -1;
@@ -199,6 +277,13 @@ namespace DshLauncher
             return (row >= 0 && row < _rowTopic.Count) ? row : -1;
         }
 
+        /// <summary>点击：入场期间先跳过动画，否则按命中结果处理。</summary>
+        /// <remarks>
+        /// 命中主题行分两种：点当前选中项 = 直接进详情（省一次点击）；点别的行 = 只换选中。
+        /// 都没命中、且落在标题栏高度内、且是左键，才当作拖动窗口 —— 顺序不能颠倒，
+        /// 否则点目录也会把窗口拖走。
+        /// </remarks>
+        /// <param name="e">鼠标参数。</param>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -213,15 +298,37 @@ namespace DshLauncher
             if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
+        /// <summary>打开详情（三级界面），模态显示，关掉后回到本窗。</summary>
+        /// <remarks>
+        /// 完整的主题列表一并传下去：详情窗要支持"上一/下一主题"，得知道自己在列表里的位置。
+        /// 用 <c>using</c> 是为了异常路径上也能释放窗口。
+        /// 详情窗换主题时不刷新自身，而是以 <c>DialogResult.Retry</c> 关闭并把目标放进 <c>Tag</c>
+        /// （见 HelpDetailForm.NextTopic），由上层决定要不要再开一窗；**本调用点没有接这个返回值**，
+        /// 所以"下一主题"目前的效果只是退回目录。
+        /// </remarks>
         private void OpenDetail()
         {
             if (_selected < 0 || _selected >= _topics.Count) return;
+            // TODO(待确认): 详情窗的 DialogResult.Retry / NextTopic 是否要在这里接续成"换主题再开一窗"？
             using (HelpDetailForm d = new HelpDetailForm(_topics[_selected], _topics))
                 d.ShowDialog(this);
         }
 
         // ---------------- 绘制 ----------------
 
+        /// <summary>
+        /// 画整套版式：底、极淡网格、绿顶边与标题栏、刻度带、标识、两部分内容、章节头、四角括号。
+        /// </summary>
+        /// <remarks>
+        /// 绘制顺序就是叠放顺序，别随意调换（网格在底色之上、内容在网格之上）。
+        /// 两处不显然的地方：
+        /// ① 章节头用 <c>TranslateTransform</c> 跟着 <c>AutoScrollPosition</c> 平移 ——
+        ///    AutoScroll 只会移动**子控件**，自绘内容框架不管；平移完必须立刻用反向位移还原，
+        ///    否则后面的四角括号会跟着偏移。
+        /// ② 标题的"擦入"用手动截断（<c>Theme.DrawTracked</c> 的 maxX）而不是 <c>SetClip</c>：
+        ///    这套排字走 GDI，GDI 文字不认 GDI+ 的裁剪区。
+        /// </remarks>
+        /// <param name="e">绘制参数，本方法只用其中的 Graphics。</param>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -278,7 +385,9 @@ namespace DshLauncher
             DrawOverview(g, right);
 
             // 章节标题（chip + 中文 + 英文）
+            g.TranslateTransform(0, AutoScrollPosition.Y);   // 自绘内容跟随滚动（子控件会移，自绘不会 —— 框架不做这个平移）
             DrawSectionHeads(g);
+            g.TranslateTransform(0, -AutoScrollPosition.Y);
 
             if (_reveal.WantsLayout)
                 UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)), Theme.Ink, _reveal.BracketPhases());
@@ -286,6 +395,12 @@ namespace DshLauncher
             base.OnPaint(e);
         }
 
+        /// <summary>画两栏的章节头（近黑 chip + 中文标题 + 灰色英文小字）。</summary>
+        /// <remarks>
+        /// 标题的 x 由章节序号决定：第 0 节在左栏（目录上方），第 1 节在右栏（概览上方）。
+        /// 每节各自有自己的显形进度，进度不足就直接跳过整块 —— 入场时它们是逐笔出现的。
+        /// </remarks>
+        /// <param name="g">目标画布。</param>
         private void DrawSectionHeads(Graphics g)
         {
             List<WindowReveal.Section> secs = _reveal.Sections;
@@ -306,6 +421,16 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>画左侧主题目录：细线卡片、分组标题行、主题行（含选中/悬停态）、滚动条。</summary>
+        /// <remarks>
+        /// 两条硬约束，改动前先看清楚：
+        /// ① **不能用 SetClip 裁行**：行文字走 TextRenderer（GDI），GDI 文字不认 GDI+ 的裁剪区，
+        ///    越界的行会照画到面板外面 —— 所以这里只画"完整落在面板内"的行，靠整行滚动来对齐。
+        /// ② 标题必须按可用宽度手动截断（<c>Theme.ClipTracked</c>），理由同上，
+        ///    也免得它顶到行尾的 SECT. 编号上。
+        /// 滚动条只在内容超出可视区时才出现，长度按内容比例算。
+        /// </remarks>
+        /// <param name="g">目标画布。</param>
         private void DrawTopics(Graphics g)
         {
             int left = Theme.S(PadX);
@@ -372,6 +497,14 @@ namespace DshLauncher
         }
 
 
+        /// <summary>取某一行所属的分组名。</summary>
+        /// <remarks>
+        /// 行结构是"分组标题行 + 若干主题行"，所以从本行往上回溯，遇到的第一个标题行就是所属分组；
+        /// 再数它是第几个标题行，用这个序号去 <c>_groups</c> 取名（序号与 <c>_groups</c> 的顺序
+        /// 由 <c>BuildRows</c> 保证一致）。
+        /// </remarks>
+        /// <param name="row">行号。</param>
+        /// <returns>分组名；回溯不到（理论上不会发生）时返回空串。</returns>
         private string GroupOfRow(int row)        {
             for (int i = row; i >= 0; i--)
             {
@@ -386,6 +519,13 @@ namespace DshLauncher
             return "";
         }
 
+        /// <summary>画右侧概览：章节 chip、主题标题、摘要、要点清单、底部快捷键提示与署名。</summary>
+        /// <remarks>
+        /// 要点是"能塞多少塞多少"：剩余高度不足时直接跳出循环（<c>ClientSize.Height - 110</c> 那道闸），
+        /// 保证不会压到底部的按钮行与提示行上。
+        /// </remarks>
+        /// <param name="g">目标画布。</param>
+        /// <param name="right">内容右边界的设备像素 x（已扣掉右边距）。</param>
         private void DrawOverview(Graphics g, int right)
         {
             if (_selected < 0 || _selected >= _topics.Count) return;

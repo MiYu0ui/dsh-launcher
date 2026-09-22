@@ -13,6 +13,19 @@ namespace DshLauncher
     /// </summary>
     internal static class Diagnostics
     {
+        /// <summary>
+        /// 收集信息并写出诊断 txt，返回该文件的完整路径。
+        /// </summary>
+        /// <param name="cfg">当前配置；只读取，不修改。</param>
+        /// <param name="server">当前服务实例；<c>Status</c> / <c>Owned</c> / <c>LastError</c> 会被写入报告。</param>
+        /// <param name="update">本次更新检查的结果；null 表示还没检查过，报告里写"(本次未检查)"。</param>
+        /// <returns>写好的诊断日志文件路径（在桌面上）。</returns>
+        /// <remarks>
+        /// 内容分六段：基本信息、运行环境、DSH 服务、更新检查、配置文件原文、启动器日志。
+        /// 服务与环境那几段各自包了 try：探不出来的项宁可整段缺失，也不让导出整体失败。
+        /// 配置原文与日志都会过一遍 <see cref="SecretMask"/>，token 不会出现在导出文件里。
+        /// 写盘用带 BOM 的 UTF-8，方便直接双击用记事本看清中文。
+        /// </remarks>
         public static string Export(AppConfig cfg, DshServer server, UpdateInfo update)
         {
             StringBuilder sb = new StringBuilder();
@@ -86,6 +99,11 @@ namespace DshLauncher
             return path;
         }
 
+        /// <summary>读一个文本文件并脱敏，供报告原文引用；任何失败都变成一句可读的说明而不是异常。</summary>
+        /// <returns>文件内容（去掉尾部空白并已脱敏）、"(文件不存在)" 或 "(读取失败：…)"。</returns>
+        /// <remarks>
+        /// 这里仍要脱敏的原因：磁盘上可能还留着"修复之前"写下的老配置 / 老日志，不能只指望写入侧已经洗过。
+        /// </remarks>
         private static string ReadText(string path)
         {
             try
@@ -97,6 +115,9 @@ namespace DshLauncher
             catch (Exception ex) { return "(读取失败：" + ex.Message + ")"; }
         }
 
+        /// <summary>静默执行一条命令并把 stdout / stderr 合成一行，用于在报告里带上版本号这类信息。</summary>
+        /// <returns>命令成功（退出码 0）且有输出时的输出文本；否则返回空串 —— 失败信息不值得占报告篇幅。</returns>
+        /// <remarks>超时 6 秒、不显示窗口（走 <see cref="HiddenRunner"/>），所以诊断导出期间不会闪黑窗。</remarks>
         private static string Capture(string exe, string args)
         {
             try
@@ -109,6 +130,13 @@ namespace DshLauncher
             catch { return ""; }
         }
 
+        /// <summary>收集启动器日志：取最近的两个日志文件拼进报告。</summary>
+        /// <returns>拼好的日志文本（每份带文件名分隔行）；目录或文件有问题时返回一句说明。</returns>
+        /// <remarks>
+        /// 截断策略按新旧不同：最新那份留尾部 1200 行、上一份只留 300 行，被砍掉的行数会写在报告里。
+        /// 日志按文件名排序后倒序，而文件名带日期，所以"第一个"就是最新那份。
+        /// 整段包在 try 里：日志收集失败不该让导出失败，失败原因只写进报告正文。
+        /// </remarks>
         private static string CollectLogs()
         {
             StringBuilder sb = new StringBuilder();

@@ -3,13 +3,36 @@ using System.Collections.Generic;
 
 namespace DshLauncher
 {
-    /// <summary>帮助内容的第二部分（SECT. 08 起）。与 HelpTopics.cs 同一个类，纯数据。</summary>
+    /// <summary>
+    /// 帮助内容的第二部分（SECT. 08 起）。与 HelpTopics.cs 是同一个 partial 类，同样是**纯数据**：
+    /// 全文只调用 HelpTopics.T(...) 这个主题工厂与 HelpBlock 的静态构造方法，不引用任何界面类型，
+    /// 所以增删主题、润色文案都不需要碰 UI 代码。
+    /// </summary>
+    /// <remarks>
+    /// 写条目时的约定（渲染细节见 HelpDetailForm.OnPaint，动手改文案前值得先看一眼）：
+    ///   · Index 是二级界面左侧那个编号条，必须唯一；本文件从 SECT. 08 接续 HelpTopics.cs 的 01-07；
+    ///   · Group 决定二级界面的分组，顺序按**首次出现**排（HelpTopics.Groups()），同组主题要连续排布；
+    ///   · Summary 与 KeyPoints 只出现在二级界面的概览里，Blocks 才是三级界面的正文；
+    ///   · Kv 的每条按**第一个**等号切成 键/值：键里不能再有等号，值里可以有；键从 4 设计像素起画、
+    ///     没有宽度限制，太长就会压到 196 设计像素处的值列，所以键要短；值那一列过长会被省略号截断；
+    ///   · Steps 的序号由渲染器按行号自动画 1..n，正文里不要再手写序号；
+    ///   · Para 只画 Lines[0]，Sub 只用 Title —— 多写的行会被静默忽略；
+    ///   · 正文里成对出现的星号不是标记语法，渲染器不做任何解析，会原样显示给用户。
+    /// </remarks>
     internal static partial class HelpTopics
     {
+        /// <summary>
+        /// 构造 SECT. 08 起的主题。由 HelpTopics.Build() 在末尾调用，返回值被拼进同一个列表。
+        /// 每次调用都新建 List（不与 HelpTopics.All 的缓存共享），所以重复调用是安全的。
+        /// </summary>
         private static List<HelpTopic> BuildMore()
         {
             List<HelpTopic> list = new List<HelpTopic>();
 
+            // 一个 list.Add(T(...)) = 一个主题。参数顺序：编号 / 分组 / 中文标题 / 英文小字 / 一句话摘要 /
+            // 二级界面概览里的要点数组 / 三级界面正文块（可变参数，按传入顺序排版）。
+            //
+            // SECT. 08 托盘与开机自启：托盘右键菜单、静默自启（走启动文件夹快捷方式）、旧 PowerShell 自启项的退役。
             list.Add(T("SECT. 08", "日常", "托盘、关机与开机自启", "TRAY & AUTOSTART",
                 "关窗口默认只收进托盘；开机自启是静默的（没有任何黑窗口一闪而过）。",
                 new string[]
@@ -21,6 +44,8 @@ namespace DshLauncher
                 HelpBlock.Kv("托盘右键菜单",
                     "打开界面=与主按钮同效",
                     "启动 / 停止服务=同上（按当前状态禁用其一）",
+                    // TODO(待确认): 正文里的「同一个人口」疑为「同一个入口」的笔误。这属于帮助数据，
+                    //               本次只补注释、不改字符串，确认后再统一订正。
                     "设置 / 帮助 / 卸载=与主界面同一个人口",
                     "退出=真正退出启动器（服务是否停止由你选）"),
                 HelpBlock.Steps(
@@ -32,6 +57,7 @@ namespace DshLauncher
                 HelpBlock.Kv("相关配置项", "closetotray=1 关闭到托盘；autostart=1 开机自启")
             ));
 
+            // SECT. 09 三处快捷方式：桌面 / 开始菜单 / 启动文件夹各自由谁管，以及「创建 / 修复快捷方式」这个入口。
             list.Add(T("SECT. 09", "日常", "三处快捷方式与修复", "SHORTCUTS",
                 "桌面 / 开始菜单 / 启动文件夹三处都由启动器统一管理，设置里有一键修复。",
                 new string[]
@@ -48,6 +74,7 @@ namespace DshLauncher
                 HelpBlock.Note("不会动别的快捷方式", "只处理文件名与目标都指向本启动器的那三处，其他 .lnk 一律不碰。")
             ));
 
+            // SECT. 10 更新：更新源（GitHub Release 的 exe 加同名 .sha256）与改名换新的整个流程；正文里写明仓库当前为 Private 时 404 属预期。
             list.Add(T("SECT. 10", "日常", "检查更新与自动更新", "UPDATE",
                 "点「检查更新」比对版本；有新版本会变成「更新 x.y.z」，点了就改名换新并重启自己。",
                 new string[]
@@ -66,6 +93,7 @@ namespace DshLauncher
                 HelpBlock.Kv("更新源", "GitHub Release 资产（exe + 同名 .sha256）；仓库坐标可在构建时用 repo.txt 覆盖")
             ));
 
+            // SECT. 11 卸载：五种范围、三组清单（将删除 / 将保留 / 不会动）、硬护栏与打字确认；本文件里最长的一篇。
             list.Add(T("SECT. 11", "日常", "卸载：五种范围与硬护栏", "UNINSTALL",
                 "五个范围从「只删程序包」到「全删」；危险范围必须手打确认词，默认送回收站。",
                 new string[]
@@ -93,6 +121,7 @@ namespace DshLauncher
                 HelpBlock.Kv("导出清单", "卸载窗口底部有「导出清单」：只写清单、不做任何删除，方便你留档或核对。")
             ));
 
+            // SECT. 12 命令行参数：这张表是 Args.Usage() 的手写副本，改参数时两边必须同步，别只改一处。
             list.Add(T("SECT. 12", "进阶", "命令行参数", "COMMAND LINE",
                 "启动器是 GUI 程序，但保留了一组参数用于自启、自检与自动化。",
                 new string[]
@@ -118,6 +147,7 @@ namespace DshLauncher
                 HelpBlock.Note("单实例", "启动器同一时间只允许一个实例（互斥体 Local\\DshLauncher.SingleInstance）。再次双击只会把已有窗口唤到前面。")
             ));
 
+            // SECT. 13 自检与日志：正文里的 [1]..[6] 与 SelfTest.cs 生成的报告小节一一对应，改报告结构要同步改这里。
             list.Add(T("SECT. 13", "进阶", "自检与诊断日志", "SELFTEST & LOGS",
                 "--selftest 会把「服务能不能起、有没有黑窗」写成一份报告；日志与诊断导出都在设置里。",
                 new string[]
@@ -141,6 +171,7 @@ namespace DshLauncher
                     "导出诊断=设置里「导出诊断日志」，打包日志与配置（token 已脱敏）")
             ));
 
+            // SECT. 14 排障：按现象分小节（服务起不来 / 页面空白 / 下载失败 / 更新 404 / 卸载残留 / 托盘图标），便于用户对号入座。
             list.Add(T("SECT. 14", "进阶", "排障：常见问题", "TROUBLESHOOTING",
                 "黑窗、端口占用、服务起不来、TLS 抽风、更新 404 —— 逐条给出判断与做法。",
                 new string[]
@@ -170,6 +201,7 @@ namespace DshLauncher
                 HelpBlock.P("Windows 会把不常用的托盘图标收进「隐藏的图标」折叠区。也可以直接再双击一次快捷方式把窗口唤出来。")
             ));
 
+            // SECT. 15 关于：正文里的版本号是运行时从 BuildInfo.Version 拼进来的（见下面的要点数组），不是写死的字符串。
             list.Add(T("SECT. 15", "进阶", "关于本启动器", "ABOUT",
                 "版本、设计来源、许可与它到底做了什么。",
                 new string[]

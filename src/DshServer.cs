@@ -10,13 +10,22 @@ using System.Threading;
 
 namespace DshLauncher
 {
+    /// <summary>服务状态机。External = 端口上已有 DSH，但不是本启动器拉起的（只接管显示，不拥有进程）。</summary>
+    /// <remarks>
+    /// PortConflict 目前没有任何赋值点（端口被别人占用时走 Failed，靠 LastError 说明原因），
+    /// 但托盘文案、状态指示灯与表单已经在读它，保留这个取值。
+    /// </remarks>
     internal enum ServerStatus { Stopped, Starting, Running, Stopping, External, PortConflict, Failed }
 
+    /// <summary>端口探测结论：没人监听 / 已是 DSH（可能需要令牌）/ 被别的程序占用。</summary>
     internal enum ProbeState { Down, Dsh, Other }
 
     /// <summary>定位 node / npx / dsh 入口。</summary>
     internal static class DshLocator
     {
+        /// <summary>在 PATH 里逐目录找文件。自己扫而不用 where.exe：省一次进程启动，也不会闪窗口。</summary>
+        /// <returns>命中返回完整路径；PATH 为空或都没找到时返回 null。</returns>
+        /// <remarks>PATH 里带引号的项（例如 "C:\Program Files\nodejs"）会先去掉两端引号再拼路径。</remarks>
         public static string SearchPath(string fileName)
         {
             try
@@ -39,6 +48,8 @@ namespace DshLauncher
             return null;
         }
 
+        /// <summary>定位 node.exe：配置里写死的路径 → PATH → 两个最常见的安装目录。</summary>
+        /// <returns>找不到返回 null（调用方据此提示"请安装 Node.js"）。</returns>
         public static string FindNode(AppConfig cfg)
         {
             if (!string.IsNullOrEmpty(cfg.NodePath) && File.Exists(cfg.NodePath)) return cfg.NodePath;
@@ -53,12 +64,16 @@ namespace DshLauncher
             return null;
         }
 
+        /// <summary>定位 npx.cmd。注意 .cmd 必须经 cmd.exe 才能起来，能不折腾就优先用下面的 npx-cli.js。</summary>
+        /// <returns>找不到返回 null。</returns>
         public static string FindNpxCmd(AppConfig cfg)
         {
             return SearchPath("npx.cmd");
         }
 
         /// <summary>node 自带的 npx-cli.js（用它可完全绕开 cmd.exe，少一层窗口风险）。</summary>
+        /// <returns>找到返回完整路径；nodeExe 为空或两处都没有时返回 null。</returns>
+        /// <remarks>两个候选位置对应 npm 的两种安装布局：与 node.exe 同级，或包在 lib\ 目录下。</remarks>
         public static string FindNpxCliJs(string nodeExe)
         {
             if (string.IsNullOrEmpty(nodeExe)) return null;
@@ -76,6 +91,11 @@ namespace DshLauncher
         }
 
         /// <summary>已缓存的 @deepseek-ai/dsh 入口 bin.js（极速模式用）。</summary>
+        /// <returns>找到返回完整路径；都没有时返回 null（调用方据此回落到 npx 在线启动）。</returns>
+        /// <remarks>
+        /// 扫 npx 缓存（%LocalAppData%\npm-cache\_npx 下的哈希目录）与 %AppData%\npm，取其中
+        /// node_modules\@deepseek-ai\dsh\lib\bin.js 写入时间最新的一份 —— 缓存目录名是哈希，没法直接拼出来。
+        /// </remarks>
         public static string FindCachedEntry(AppConfig cfg)
         {
             if (!string.IsNullOrEmpty(cfg.DshEntry) && File.Exists(cfg.DshEntry)) return cfg.DshEntry;
@@ -117,6 +137,19 @@ namespace DshLauncher
     /// <summary>在后台静默执行一个子进程并取得输出（绝不产生窗口）。</summary>
     internal static class HiddenRunner
     {
+        /// <summary>在后台静默执行一个子进程并取回输出，全程不产生窗口。</summary>
+        /// <param name="fileName">可执行文件（node.exe / cmd.exe / taskkill.exe 等）。</param>
+        /// <param name="arguments">命令行参数，按原样传给子进程。</param>
+        /// <param name="workingDir">子进程的工作目录；为空表示沿用当前目录。</param>
+        /// <param name="environment">额外注入的环境变量（例如 npm_config_registry）；可为 null。</param>
+        /// <param name="timeoutMs">超时毫秒数；超时会结束该进程。</param>
+        /// <param name="stdout">子进程的标准输出（按 UTF-8 解码）。</param>
+        /// <param name="stderr">子进程的标准错误；进程没能起来时里面是异常信息。</param>
+        /// <returns>子进程退出码；超时返回 -1，启动/读取抛异常返回 -2（stderr 里带异常信息）。</returns>
+        /// <remarks>
+        /// stdout 与 stderr 各用一个线程读到底：只读一路时，另一路管道写满会把子进程卡死。
+        /// 输出按不带 BOM 的 UTF-8 解码，与 DSH / npm 的输出保持一致。
+        /// </remarks>
         public static int Run(string fileName, string arguments, string workingDir,
                               Dictionary<string, string> environment, int timeoutMs,
                               out string stdout, out string stderr)
@@ -174,39 +207,47 @@ namespace DshLauncher
     /// <summary>DeepSeek Harness 服务进程的启动、就绪探测与停止。</summary>
     internal class DshServer
     {
-        private readonly object _gate = new object();
-        private Process _proc;
+        private readonly object _gate = new object();   // 保护 _proc 与 _status
+        private Process _proc;                          // 非 null 即"这个进程归我们管"（Owned）
         private ServerStatus _status = ServerStatus.Stopped;
         private string _lastError = "";
-        private volatile bool _cancel;
+        private volatile bool _cancel;                  // 置位表示"这次退出是我们主动停的"，不要报成崩溃
+        // DSH 就绪时会把带令牌的地址打在输出里，形状固定为 "dsh web: http://…"（token 每次都不同）
         private readonly Regex _urlPattern = new Regex(@"dsh web:\s*(http://\S+)", RegexOptions.Compiled);
 
+        /// <summary>日志事件（可能在启动线程或进程回调线程上触发，订阅方需自行切回界面线程）。</summary>
         public event LogHandler Log;
+        /// <summary>状态变化事件（同样：SetStatus 会在任意线程上触发）。</summary>
         public event EventHandler StatusChanged;
         /// <summary>本启动器拉起的服务刚刚就绪（用于播放接入过渡动画并交接界面）。</summary>
         public event EventHandler Serving;
 
+        /// <summary>触发 Serving 事件；订阅方抛异常只吞掉，不允许影响服务本身。</summary>
         private void RaiseServing()
         {
             EventHandler h = Serving;
             if (h != null) { try { h(this, EventArgs.Empty); } catch { } }
         }
 
-        public string WebUrl;      // 规范地址 http://127.0.0.1:port/
-        public string OpenUrl;     // 实际打开地址（可能带 token）
+        public string WebUrl;      // 规范地址 http://127.0.0.1:port/（不带令牌；PortFromWebUrl 靠它反查端口）
+        public string OpenUrl;     // 实际打开地址（优先用 DSH 打印出来的带 token 地址）
 
+        /// <summary>当前状态（加锁读，任意线程可调）。</summary>
         public ServerStatus Status
         {
             get { lock (_gate) { return _status; } }
         }
 
+        /// <summary>最近一次失败原因（给界面与诊断用；每次启动前清空）。</summary>
         public string LastError { get { return _lastError; } }
 
+        /// <summary>进程是否由本启动器拉起。External（别人起的服务）时为 false，此时不该去 Stop 它。</summary>
         public bool Owned
         {
             get { lock (_gate) { return _proc != null; } }
         }
 
+        /// <summary>我们拉起的那个进程是否还活着（_proc 为 null 或已退出都算 false）。</summary>
         public bool IsProcessAlive
         {
             get
@@ -220,6 +261,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>改状态并去重：只有真的变了才落日志、发事件，避免界面被无意义的刷新淹没。</summary>
         private void SetStatus(ServerStatus s)
         {
             bool changed;
@@ -236,6 +278,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>上报日志：有订阅方时交给它统一落盘，没有才自己写文件，避免同一条写两遍。</summary>
         private void Emit(string message, LogLevel level)
         {
             LogHandler h = Log;
@@ -243,9 +286,17 @@ namespace DshLauncher
             else FileLog.Write("[" + level + "] " + message);
         }
 
+        /// <summary>拼规范地址：回环地址 + 十进制端口 + 结尾斜杠。</summary>
         public static string NormalizeUrl(int port) { return "http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture) + "/"; }
 
         /// <summary>探测端口：空闲 / 已是 DSH / 被其他程序占用。</summary>
+        /// <param name="port">要探测的本机端口。</param>
+        /// <param name="detail">给界面看的中文结论（"端口空闲"/"已是 DeepSeek Harness 服务"…）。</param>
+        /// <returns>Down = 没人监听；Dsh = 已是 DSH；Other = 被别的程序占用。</returns>
+        /// <remarks>
+        /// 最长等 2.5 秒。DSH 首页需要访问令牌，无令牌访问会拿到 401 且正文里有 "dsh web" 提示，
+        /// 这种响应同样算 Dsh —— 否则会把一个正在跑的服务误判成"端口被占用"。
+        /// </remarks>
         public static ProbeState Probe(int port, out string detail)
         {
             detail = "";
@@ -300,6 +351,9 @@ namespace DshLauncher
         }
 
         /// <summary>带令牌访问服务首页：返回状态码（200 表示服务已能正常提供界面）。</summary>
+        /// <param name="url">要访问的完整地址（通常是 DSH 打印出来的带 token 地址）。</param>
+        /// <param name="body">响应正文（最多 16 KB）。</param>
+        /// <returns>HTTP 状态码；连不上、超时或拿不到响应时返回 0（401 等错误码也会如实返回）。</returns>
         public static int HttpStatus(string url, out string body)
         {
             body = "";
@@ -333,6 +387,8 @@ namespace DshLauncher
             catch { return 0; }
         }
 
+        /// <summary>最多读 max 字节正文（判断"是不是 DSH"只看开头，不必整页读下来）。</summary>
+        /// <returns>按 UTF-8 解码的正文；读失败返回空串。</returns>
         private static string ReadLimited(WebResponse resp, int max)
         {
             try
@@ -351,6 +407,7 @@ namespace DshLauncher
         }
 
         /// <summary>在后台线程里完成：校验 -> 启动 -> 等待就绪。</summary>
+        /// <remarks>立即返回：真正的启动、探测与等待都在后台线程 "dsh-start" 上做，结果通过 StatusChanged 通知。</remarks>
         public void StartAsync(AppConfig cfg)
         {
             _cancel = false;
@@ -362,6 +419,10 @@ namespace DshLauncher
             t.Start();
         }
 
+        /// <summary>
+        /// 启动主流程：先探端口，再按 LaunchMode 选启动方式 —— 极速模式直接跑缓存里的 bin.js，
+        /// 否则用 node + npx-cli.js；两条都不行才回落到经 cmd.exe 调 npx.cmd。最后统一等就绪。
+        /// </summary>
         private void StartWorker(AppConfig cfg)
         {
             try
@@ -452,8 +513,11 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>给路径或参数加双引号（Node 常装在带空格的目录下，不加引号会被拆成多个参数）。</summary>
         private static string Quote(string s) { return "\"" + s + "\""; }
 
+        /// <summary>拉起服务进程并把输出接到日志上；进程对象在锁内记入 _proc，之后才算"归我们管"。</summary>
+        /// <remarks>工作目录即 DSH 的工作区；全程 CreateNoWindow，不闪黑框。</remarks>
         private void Launch(string file, string args, AppConfig cfg, Dictionary<string, string> env)
         {
             ProcessStartInfo psi = new ProcessStartInfo(file, args);
@@ -484,6 +548,10 @@ namespace DshLauncher
             Emit("进程已启动（PID " + p.Id + "），等待服务就绪…", LogLevel.Dim);
         }
 
+        /// <summary>
+        /// 服务进程的每一行输出：优先从里面抓 DSH 打印的带令牌地址（抓到就更新 OpenUrl）；
+        /// 其余按来源分级 —— stderr 记 Warn，npm 的 warn 压成 Dim，免得刷屏。
+        /// </summary>
         private void OnServiceLine(string line, bool isError)
         {
             if (line == null) return;
@@ -504,6 +572,10 @@ namespace DshLauncher
             Emit(text, level);
         }
 
+        /// <summary>
+        /// 进程退出回调：先摘掉 _proc（此后不再算我们拥有它）。
+        /// _cancel 为真说明是 Stop() 主动停的，按"已停止"处理；仍停在 Starting 则说明是启动失败。
+        /// </summary>
         private void OnServiceExited()
         {
             int code = -1;
@@ -534,6 +606,9 @@ namespace DshLauncher
         }
 
         /// <summary>服务是否已经可以打开界面。优先用 dsh 打印出来的带令牌地址判断。</summary>
+        /// <param name="cfg">当前配置，端口从它取（回环地址由 NormalizeUrl 拼出）。</param>
+        /// <param name="how">判定依据（写进日志，便于区分是哪条通道先通过的）。</param>
+        /// <returns>能打开界面即为 true。</returns>
         private bool IsReady(AppConfig cfg, out string how)
         {
             how = "";
@@ -556,6 +631,10 @@ namespace DshLauncher
             return false;
         }
 
+        /// <summary>
+        /// 轮询等待服务就绪，最长 5 分钟（每 20 秒一条心跳，免得看起来像卡死）。
+        /// 请求取消或进程提前退出都会立即返回；只有超时才判失败。
+        /// </summary>
         private void WaitReady(AppConfig cfg)
         {
             DateTime started = DateTime.Now;
@@ -588,6 +667,8 @@ namespace DshLauncher
         }
 
         /// <summary>端口上是否有程序在监听（轻量 TCP 探测，不产生 HTTP 请求）。</summary>
+        /// <returns>300ms 内能连上回环端口即为 true。</returns>
+        /// <remarks>只做 TCP 连接、不发 HTTP 请求 —— 它供端口巡检使用，代价必须足够低。</remarks>
         public static bool TcpAlive(int port)
         {
             try
@@ -611,6 +692,7 @@ namespace DshLauncher
             SetStatus(ServerStatus.External);
         }
 
+        /// <summary>统一的失败出口：记下原因、报日志、置为 Failed（界面据此显示红色提示）。</summary>
         private void Fail(string message)
         {
             _lastError = message;
@@ -619,6 +701,11 @@ namespace DshLauncher
         }
 
         /// <summary>核对下载源与固定版本的完整性（沿用原有安装脚本的安全策略）。</summary>
+        /// <returns>通过核验的下载源；找不到 npm 时跳过核验、直接返回配置里的源。</returns>
+        /// <remarks>
+        /// 失败时内部已经报过错，调用方直接 return 即可，不要重复报。
+        /// 与部署期的 Deployment.SourceVerify 是同策略的两份实现，差别就在"找不到 npm"时这里选择放行。
+        /// </remarks>
         private string VerifySource(AppConfig cfg)
         {
             Emit("正在核对 " + cfg.PinnedVersion + " 的下载源完整性…", LogLevel.Dim);
@@ -676,6 +763,7 @@ namespace DshLauncher
         }
 
         /// <summary>从 npm --json 输出里取字段（避免额外依赖，做个够用的解析）。</summary>
+        /// <returns>字符串值去掉引号后返回，标量原样返回；键不存在时返回 null。</returns>
         private static string ExtractJsonString(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return null;
@@ -705,6 +793,8 @@ namespace DshLauncher
             return json.Substring(start, i - start);
         }
 
+        /// <summary>打开 Web 界面：开了 Edge 应用模式就尽量用它（像原生窗口、没有地址栏），否则回落系统默认浏览器。</summary>
+        /// <remarks>失败只写日志、不弹窗 —— 这个动作可能是服务就绪后自动触发的，不能打断用户。</remarks>
         public static void OpenInBrowser(AppConfig cfg, string url)
         {
             try
@@ -730,6 +820,8 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>定位 msedge.exe（三个常见位置：Program Files (x86)、Program Files、用户级安装）。</summary>
+        /// <returns>找不到返回 null（调用方回落到系统默认浏览器）。</returns>
         private static string FindEdge()
         {
             string[] candidates = new string[]
@@ -743,6 +835,10 @@ namespace DshLauncher
         }
 
         /// <summary>停止服务（连同其子进程一起结束，避免残留）。</summary>
+        /// <remarks>
+        /// 先用 taskkill /T /F 结束整棵进程树（npx 还会再起子进程，只杀父进程会留残留），
+        /// 再等进程消失，最后**复验端口**：端口没释放就绝不宣告"已停止"。
+        /// </remarks>
         public void Stop()
         {
             int pid;
@@ -809,6 +905,21 @@ namespace DshLauncher
             catch { return 0; }
         }
 
+        /// <summary>
+        /// 本启动器**自己拉起的** DSH 服务进程 PID（0 = 不是我们拉起的，或已停止）。
+        /// 「清扫残留」用它把自己正在跑的服务排除在外 —— 否则一键全杀会把自己的服务杀掉。
+        /// </summary>
+        public int OwnPid
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    try { return _proc != null && !_proc.HasExited ? _proc.Id : 0; }
+                    catch { return 0; }
+                }
+            }
+        }
         /// <summary>不拥有进程时（外部启动），仅重置界面状态。</summary>
         public void Detach()
         {

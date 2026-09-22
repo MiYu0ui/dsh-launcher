@@ -14,7 +14,9 @@ namespace DshLauncher
     /// </summary>
     internal class UninstallList : Panel
     {
+        // 当前要画的条目（由 SetRows 整体替换，不在绘制过程中改动）
         private List<UninstallTarget> _rows = new List<UninstallTarget>();
+        // 列表为空时显示的那句话：清点期间是"正在清点…"，清点完没有可处理项时是"没有需要处理的项目。"
         private string _empty = "正在清点…";
 
         public UninstallList()
@@ -25,12 +27,16 @@ namespace DshLauncher
             Anim.Track(this, 1);
         }
 
+        /// <summary>注销动画注册。Anim 持有控件引用，不注销会让已关闭的窗口一直被动画时钟拖着重绘。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing) Anim.Untrack(this);
             base.Dispose(disposing);
         }
 
+        /// <summary>整体替换列表内容（传 null 视为空列表），并立刻重绘。</summary>
+        /// <param name="rows">要显示的条目，顺序即绘制顺序。</param>
+        /// <param name="emptyText">列表为空时显示的占位文案。</param>
         public void SetRows(List<UninstallTarget> rows, string emptyText)
         {
             _rows = rows == null ? new List<UninstallTarget>() : rows;
@@ -41,13 +47,14 @@ namespace DshLauncher
         // ---------------- 三种形态：清单 → 过渡 → 加载 ----------------
 
         /// <summary>过渡时长（秒）。清单形态 → 加载形态的"变形"总耗时。</summary>
+        /// <remarks>FinishExecution 会用它把"弹结果框"推迟到过渡结束，避免动画播到一半被结果框打断。</remarks>
         public const double MorphSeconds = 0.72;
 
-        private bool _running;
-        private double _morphAt;
-        private string _stage = "UNINSTALLING";
-        private UninstallProgress _prog;
-        private DateTime _startedAt = DateTime.MinValue;
+        private bool _running;                                    // true = 处于加载形态（含过渡期）
+        private double _morphAt;                                  // 过渡起点（Anim.Now 时间轴上的秒数）
+        private string _stage = "UNINSTALLING";                   // 左上角那行英文状态字，由 BeginRun 覆盖
+        private UninstallProgress _prog;                          // 最近一次进度快照；null = 还没收到进度
+        private DateTime _startedAt = DateTime.MinValue;          // 计时器起点，仅供加载形态显示"已用时"
 
         /// <summary>开始执行：从清单形态过渡到加载形态（同一块区域"变成"，不是换一个窗口）。</summary>
         public void BeginRun(string stage)
@@ -149,6 +156,11 @@ namespace DshLauncher
         /// appear = 环的淡入；textP = 文字的淡入（TextRenderer 不吃 alpha，所以用
         /// 面板底色到目标色插值来"淡"出来，视觉上等价）。
         /// </summary>
+        /// <summary>画加载形态的动画（授权环 + 进度弧 + 节点 + 文字）。</summary>
+        /// <param name="g">目标画布。</param>
+        /// <param name="r">面板内矩形（已扣除边框）。</param>
+        /// <param name="appear">环与节点的淡入进度 0..1。</param>
+        /// <param name="textP">文字的淡入进度 0..1。</param>
         private void DrawLoader(Graphics g, Rectangle r, double appear, double textP)
         {
             int cx = r.X + r.Width / 2;
@@ -338,6 +350,9 @@ namespace DshLauncher
     /// </summary>
     internal class UninstallForm : Form
     {
+        // 设计尺寸与设置窗同一套：DesignW/DesignH 是 100% 缩放下的设计像素，实际布局一律经
+        // Theme.S 换算。DesignH 比设置窗高，因为这里多摊开一块卸载明细列表。
+        // HeaderH 同时是"标题区高度"与"可拖动区域下界"，见 OnMouseDown。
         private const int DesignW = 720;
         private const int DesignH = 940;
         private const int PadX = 30;
@@ -347,6 +362,7 @@ namespace DshLauncher
         private readonly DshServer _server;
         private readonly UninstallOptions _opt = new UninstallOptions();
 
+        // 五个方案单选；文本在 ScanDone 里补上体积与"是否需打字确认"，扫描完成前显示"计算中…"
         private RadioButton[] _radios;
         private CheckBox _cbStop, _cbBackup, _cbShortcuts, _cbWallpaper, _cbMemory, _cbLegacy, _cbPermanent;
         private UninstallList _list;
@@ -354,14 +370,22 @@ namespace DshLauncher
         private FlatButton _btnRun, _btnExport;
         private UninstallMode _mode = UninstallMode.DshKeepData;
         private UninstallPlan _plan;
+        // 后台扫描算出的五个方案各自要删多少：下标与 Modes 数组一一对应。
+        // 危险标记只用来决定单选行末尾提不提示"需打字确认"，真正的判断仍在 _plan.IsDangerous 上。
         private readonly long[] _modeBytes = new long[5];
         private readonly bool[] _modeDanger = new bool[5];
-        private bool _scanning = true;
-        private bool _busy;
+        private bool _scanning = true;   // 首次清点未完成：期间 ReloadPlan 直接返回，避免拿着空数据建计划
+        private bool _busy;              // 正在执行删除：此时关窗要二次确认，且输入全部锁死
 
-        /// <summary>本次是否把启动器自己也卸了（调用方据此收尾退出）。</summary>
+        /// <summary>本次是否把启动器自己也卸了。调用方（LauncherContext.OpenUninstall）据此在对话框关闭后退出进程。</summary>
+        /// <remarks>
+        /// 由执行线程在跑完计划后按 plan.AffectsRunningLauncher 赋值，UI 线程随后读取 ——
+        /// 写入发生在 BeginInvoke 收尾之前，所以读的时候一定已经定稿。
+        /// </remarks>
         public bool LauncherRemoved;
 
+        // 方案顺序即界面自上而下的顺序，也是 _modeBytes / _modeDanger 的下标；
+        // 索引 0（DshKeepData）在 BuildUi 里被默认勾选，改这里的顺序要同步检查那两个数组的语义。
         private static readonly UninstallMode[] Modes = new UninstallMode[]
         {
             UninstallMode.DshKeepData, UninstallMode.DshEverything,
@@ -369,6 +393,8 @@ namespace DshLauncher
             UninstallMode.All
         };
 
+        // 与 Modes 逐项对应的中文标题（①..⑤ 与单选按钮的视觉编号一致）。
+        // 扫描完成后 ScanDone 会在这串标题后面追加体积，所以这里只放标题本身。
         private static readonly string[] ModeTitles = new string[]
         {
             "① 卸载 DSH（保留用户数据）",
@@ -378,6 +404,9 @@ namespace DshLauncher
             "⑤ 彻底卸载全部（DSH + 启动器）"
         };
 
+        /// <summary>建卸载窗。构造过程只搭界面，真正的磁盘清点在窗口首次显示后才异步开始。</summary>
+        /// <param name="cfg">当前启动器配置，用于取工作区与安装目录等路径。</param>
+        /// <param name="server">DSH 服务句柄，用于「先停止服务」；可为 null（此时该开关无效）。</param>
         public UninstallForm(AppConfig cfg, DshServer server)
         {
             _cfg = cfg;
@@ -387,6 +416,8 @@ namespace DshLauncher
             BuildUi();
         }
 
+        // 入场动画/版式控制器。声明放在构造函数之后，但**必须在 BuildUi 之前完成赋值** ——
+        // BuildUi 里的 AddSection 要把章节锚点登记进它，晚一步章节就会整批丢失。
         private readonly WindowReveal _reveal;
 
         /// <summary>登记一个章节锚点：标题由 OnPaint 按导轨进度自绘，不再用子控件 Label。</summary>
@@ -395,8 +426,10 @@ namespace DshLauncher
             if (_reveal != null) _reveal.AddSection(y, index, cn, en);
         }
 
+        // OnShown 可能被触发多次（例如从最小化恢复），用它保证后台清点只起一次
         private bool _scanStarted;
 
+        /// <summary>首次显示时才起后台清点，并同时开始播入场。</summary>
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -406,6 +439,11 @@ namespace DshLauncher
             if (_reveal != null) _reveal.BeginEnter();
         }
 
+        /// <summary>搭出整窗控件树：方案单选 → 明细列表 → 选项开关 → 底部按钮。</summary>
+        /// <remarks>
+        /// 所有控件位置都用 Theme.S 换算成当前 DPI 下的物理像素；本窗与设置窗共用同一套
+        /// DesignW/PadX/HeaderH，改一处要保持两个窗口的视觉一致。
+        /// </remarks>
         private void BuildUi()
         {
             SuspendLayout();
@@ -440,6 +478,7 @@ namespace DshLauncher
             int y = 120;
             for (int i = 0; i < Modes.Length; i++)
             {
+                // 闭包陷阱：事件在循环结束后才触发，直接用 i 会全部指到最后一个方案，必须先取副本
                 int idx = i;
                 RadioButton rb = new RadioButton();
                 rb.Text = ModeTitles[i] + "   · 计算中…";
@@ -538,6 +577,8 @@ namespace DshLauncher
             ResumeLayout(false);
         }
 
+        /// <summary>加一个 AutoSize 的标签（与 SettingsForm 的同名辅助方法一致）。</summary>
+        /// <remarks>当前版式没有用到它 —— 章节标题一律由 OnPaint 自绘，保留以便与设置窗对齐。</remarks>
         private void AddLabel(string text, int x, int y)
         {
             Label l = new Label();
@@ -550,6 +591,8 @@ namespace DshLauncher
             Controls.Add(l);
         }
 
+        /// <summary>加一个卸载选项复选框（统一样式与行宽，位置按设计像素给）。</summary>
+        /// <returns>新建的复选框，调用方负责保存引用以便读勾选状态与置灰。</returns>
         private CheckBox AddCheck(string text, int y)
         {
             CheckBox c = new CheckBox();
@@ -566,6 +609,7 @@ namespace DshLauncher
             return c;
         }
 
+        /// <summary>把七个开关的当前勾选状态同步进 _opt（切方案与开始执行前都要调一次）。</summary>
         private void ReadOptions()
         {
             _opt.StopService = _cbStop.Checked;
@@ -585,6 +629,7 @@ namespace DshLauncher
             {
                 try
                 {
+                    // 先清掉上一轮留下的扫盘缓存，保证五个方案都基于同一时刻的磁盘现状统计
                     Uninstaller.ClearStats();
                     UninstallOptions probe = new UninstallOptions();
                     for (int i = 0; i < Modes.Length; i++)
@@ -595,7 +640,11 @@ namespace DshLauncher
                     }
                 }
                 catch { }
-                try { BeginInvoke(new MethodInvoker(ScanDone)); }
+                // 守卫：句柄没建好或窗口已销毁时 BeginInvoke 会抛，异常被吞 → ScanDone 永不执行 →
+                // 界面就会永久停在"正在清点…"。宁可什么都不做，也不能把终态回调丢在异常里。
+                // （外层 catch 已把清点异常咽掉；这里若再抛，用户看到的就是一个永远转不完的界面。）
+            if (!IsHandleCreated || IsDisposed) return;
+            try { BeginInvoke(new MethodInvoker(ScanDone)); }
                 catch { }
             });
             t.IsBackground = true;
@@ -659,12 +708,17 @@ namespace DshLauncher
 
         // ---------------- 执行 ----------------
 
+        /// <summary>「执行卸载」入口：分层确认 → 切加载形态 → 把真正的删除丢给后台线程。</summary>
+        /// <remarks>
+        /// 确认是分层的：危险方案先打字确认，永久删除再叠一层打字确认 —— 两层都过了才动手。
+        /// 本方法只负责确认与起线程，自己不做任何删除，所以界面在删的过程中仍然流畅。
+        /// </remarks>
         private void RunUninstall()
         {
             if (_busy || _plan == null) return;
             ReadOptions();
 
-            // ① 危险方案：打字确认
+            // ① 危险方案：涉及私密数据的方案要求手动输入确认词，确认词本身由计划给出（Uninstaller.Build）
             if (_plan.IsDangerous)
             {
                 List<string> fields = new List<string>();
@@ -692,7 +746,7 @@ namespace DshLauncher
                 if (r != ConfirmDialog.Choice.Confirm) return;
             }
 
-            // ② 永久删除：再叠一层打字确认
+            // ② 永久删除：在方案确认之外再叠一层 —— 不经回收站是不可逆的，与方案危不危险是两件事
             if (_opt.Permanent)
             {
                 bool ok2 = TypeConfirm.Ask(this, "CONFIRM / 永久删除", "永久删除确认",
@@ -704,6 +758,7 @@ namespace DshLauncher
 
             // ③ 进入执行：清单形态过渡到加载形态，真正的删除丢到后台线程 ——
             //    以前是同步跑，删 1.95 GB / 11 万个文件期间整个窗口是冻住的（连动画都播不出来）。
+            //    注意 _busy 置位后本窗的关闭、Esc、回车都会走"确认中断"分支，见 OnFormClosing。
             _busy = true;
             _btnRun.Enabled = false;
             _btnExport.Enabled = false;
@@ -719,6 +774,7 @@ namespace DshLauncher
             worker.Start();
         }
 
+        // 用户已在"中断卸载"确认框里点过确认：置位后 OnFormClosing 直接放行，不再重复询问
         private bool _allowClose;
 
         protected override void Dispose(bool disposing)
@@ -727,8 +783,10 @@ namespace DshLauncher
             base.Dispose(disposing);
         }
 
+        /// <summary>关窗拦截：执行期间要用户确认，非执行期先播完退场动画再真关。</summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // 系统关机不拦：这时候弹确认框没有意义，而且会挡住关机流程
             if (_busy && !_allowClose && e.CloseReason != CloseReason.WindowsShutDown)
             {
                 ConfirmDialog.Choice r = ConfirmDialog.Show(this, "CONFIRM / 中断卸载", "卸载正在进行中",
@@ -769,8 +827,8 @@ namespace DshLauncher
 
                 Action<UninstallProgress> onProgress = delegate(UninstallProgress p)
                 {
-                    try { BeginInvoke(new MethodInvoker(delegate() { _list.UpdateProgress(p); })); }
-                    catch { }
+                    if (IsHandleCreated && !IsDisposed)
+                    try { BeginInvoke(new MethodInvoker(delegate() { _list.UpdateProgress(p); })); } catch { }
                 };
 
                 report = Uninstaller.Execute(_plan, _opt, null, onProgress, out ok, out fail);
@@ -783,11 +841,25 @@ namespace DshLauncher
 
             int okF = ok, failF = fail;
             string rep = report;
-            try { BeginInvoke(new MethodInvoker(delegate() { FinishExecution(rep, okF, failF); })); }
-            catch { }
+            // 守卫：窗口已经没了就没法回 UI —— 但结果不能丢，把报告落盘（原来这里异常被吞，
+
+            // 删除其实已经完成，界面却永远停在中间态、报告也没写）。
+            // 两个 else 分支都是"窗口已不在"：BeginInvoke 抛异常时同样要落盘，一条都不能漏。
+            if (IsHandleCreated && !IsDisposed)
+            {
+                try { BeginInvoke(new MethodInvoker(delegate() { FinishExecution(rep, okF, failF); })); }
+                catch { TrySaveReport(rep); }
+            }
+            else TrySaveReport(rep);
         }
 
         /// <summary>回到 UI 线程收尾：等过渡播完，再写报告、给结果、恢复界面。</summary>
+        /// <summary>窗口已经不在了时的兜底：把卸载报告写进日志，别让结果凭空消失。</summary>
+        private static void TrySaveReport(string rep)
+        {
+            try { FileLog.Write("[Warn] 卸载结束但窗口已关闭，结果如下：" + Environment.NewLine + rep); }
+            catch { }
+        }
         private void FinishExecution(string report, int ok, int fail)
         {
             // 小方案可能几百毫秒就删完了，而过渡要 0.72 秒。不等它走完就弹结果框的话，
@@ -810,6 +882,14 @@ namespace DshLauncher
             ShowResult(report, ok, fail);
         }
 
+        /// <summary>给出结果、写报告、恢复界面。执行期到此结束（_busy 复位）。</summary>
+        /// <param name="report">报告正文，null 或空串时不落盘。</param>
+        /// <param name="ok">删除成功的项数。</param>
+        /// <param name="fail">删除失败的项数，大于 0 时结果框附一条警告。</param>
+        /// <remarks>
+        /// 报告先写盘再弹框：用户点"打开报告位置"时文件必须已经在桌面上。
+        /// 体积缓存也要在这里清掉 —— 里面存的还是删除前的数字，不清的话刷新计划会显示旧体积。
+        /// </remarks>
         private void ShowResult(string report, int ok, int fail)
         {
             _busy = false;
@@ -819,6 +899,7 @@ namespace DshLauncher
             string reportPath = null;
             if (!string.IsNullOrEmpty(report)) reportPath = Uninstaller.WriteReport(report);
 
+            // 删除已经改动了磁盘，扫盘缓存必须作废，否则 ReloadPlan 会拿着删除前的体积当作现状
             Uninstaller.ClearStats();
 
             // ⑥ 结果
@@ -837,9 +918,13 @@ namespace DshLauncher
                 fail > 0 ? "有项目删除失败，原因见报告。" : null,
                 "打开报告位置", "打开任务管理器", false);
 
+            // 两个附加动作都在关闭本窗之前执行：一旦启动器把自己卸了，本进程马上就会退出。
+            // 报告路径为 null（写盘失败）时不再重复定位，免得让用户以为报告其实在。
             if (after == ConfirmDialog.Choice.Confirm && reportPath != null) Uninstaller.RevealInExplorer(reportPath);
             else if (after == ConfirmDialog.Choice.Alt) Uninstaller.OpenTaskManager();
 
+            // 启动器本体已被卸载：本窗的任务就此结束，返回 OK 让 LauncherContext 收尾退出。
+            // 注意这里**不播退场动画**也不需要 —— 进程马上就没了，再等 200ms 只会让用户以为卡住。
             if (LauncherRemoved)
             {
                 DialogResult = DialogResult.OK;
@@ -847,6 +932,7 @@ namespace DshLauncher
             }
             else
             {
+                // 只卸了 DSH 的情况：回到清单形态，让用户能接着换个方案再卸一次
                 _list.EndRun();
                 _btnRun.Enabled = true;
                 _btnExport.Enabled = true;
@@ -854,6 +940,12 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>把当前计划导出成一份桌面清单文本，并立刻在资源管理器里定位。</summary>
+        /// <remarks>
+        /// 纯只读：只读 _plan 与硬护栏，不调用任何删除。导出的是"还没执行"的计划，
+        /// 所以文件头特意写明"仅清单，未执行任何删除"，避免用户误以为东西已经删了。
+        /// 任何异常都吞掉 —— 导出失败不该影响卸载主流程。
+        /// </remarks>
         private void ExportList()
         {
             try
@@ -881,6 +973,8 @@ namespace DshLauncher
             catch { }
         }
 
+        /// <summary>键盘拦截：入场期间按任意键跳过动画；空闲时 Esc 关窗。</summary>
+        /// <remarks>执行期（_busy）刻意不响应 Esc —— 中途退出要走 OnFormClosing 的确认流程，不能一键溜走。</remarks>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return true; }   // 入场期间按一下就跳过
@@ -893,6 +987,8 @@ namespace DshLauncher
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>无边框窗口的拖动与"点击跳过入场"。</summary>
+        /// <remarks>只有左键落在标题区（HeaderH 以内）才拖动，免得在明细列表上误拖整窗。</remarks>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -900,16 +996,22 @@ namespace DshLauncher
             if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
+        /// <summary>无边框窗口补一个系统投影。</summary>
         protected override CreateParams CreateParams
         {
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ClassStyle |= 0x00020000;
+                cp.ClassStyle |= 0x00020000;   // CS_DROPSHADOW
                 return cp;
             }
         }
 
+        /// <summary>整窗自绘：头部色带 + 刻度尺 + 标志标题 + 四角括号 + 章节导轨。</summary>
+        /// <remarks>
+        /// 顺序即层次：纸 → 网格 → 头部色带 → 刻度尺 → 标志与标题 → 四角括号 → 章节导轨。
+        /// 子控件（单选、列表、按钮）由框架自己画在本方法之上，所以这里只画"版式"。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -972,7 +1074,11 @@ namespace DshLauncher
             Theme.DrawTrackedRight(g, "RHINE · LAB", Theme.FontMonoSmall,
                 right - markW - Theme.S(10), Theme.S(37), Theme.Mix(Theme.Panel, Theme.Sub, markP), Theme.SF(1.6f));
 
+            // 自绘内容跟随滚动：AutoScroll 只搬得动子控件，自绘的章节导轨要自己平移，
+            // 否则小屏上滚动时导轨会钉在原地、与它标注的控件错位。画完必须平移回去。
+            g.TranslateTransform(0, AutoScrollPosition.Y);   // 自绘内容跟随滚动（子控件会移，自绘不会 —— 框架不做这个平移）
             DrawSections(g);
+            g.TranslateTransform(0, -AutoScrollPosition.Y);
 
             if (_reveal != null && _reveal.WantsLayout)
                 UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)),
@@ -982,8 +1088,10 @@ namespace DshLauncher
         }
 
         /// <summary>章节导轨 + 每节的「chip + 中文标题 + 灰色英文小字」（与设置窗同一套画法）。</summary>
+        /// <summary>章节导轨 + 每节的「chip + 中文标题 + 灰色英文小字」（与设置窗同一套画法）。</summary>
         private void DrawSections(Graphics g)
         {
+            // WantsLayout 为 false（动效关闭 / 缩略档）时章节只有登记信息、不排版，这里直接跳过
             if (_reveal == null || !_reveal.WantsLayout || _reveal.Sections.Count == 0) return;
 
             int railX = Theme.S(14);

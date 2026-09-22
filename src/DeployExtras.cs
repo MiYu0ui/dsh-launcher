@@ -15,6 +15,14 @@ namespace DshLauncher
     /// </summary>
     internal static class SysCheck
     {
+        /// <summary>
+        /// RtlGetVersion 的输出结构（ntdll 的 RTL_OSVERSIONINFOW）。
+        /// </summary>
+        /// <remarks>
+        /// 布局必须与 ntdll 的定义逐字段对齐：<c>dwOSVersionInfoSize</c> 要在调用前填成结构体字节数，
+        /// 否则 RtlGetVersion 直接失败。CharSet 只能是 Unicode —— 原生侧的 <c>szCSDVersion</c>
+        /// 是定长宽字符数组，按 ANSI 封送会读成乱码。
+        /// </remarks>
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         private struct OSVERSIONINFO
         {
@@ -27,6 +35,17 @@ namespace DshLauncher
             public string szCSDVersion;
         }
 
+        /// <summary>
+        /// 向 ntdll 直接问系统版本。返回 0（STATUS_SUCCESS）才表示 <paramref name="info"/> 被填好。
+        /// </summary>
+        /// <remarks>
+        /// 之所以不用 GetVersionEx / VerifyVersionInfo：它们会被进程清单里的 supportedOS 声明左右，
+        /// 而 RtlGetVersion 只看内核真实版本（详见 <see cref="RealVersion"/> 的说明）。
+        /// 它不是 Win32 API 的正式成员（文档归在 WDK 一侧），但 ntdll.dll 一直导出它，
+        /// 本工具只支持 Windows 10/11，不需要为更老的系统留后路。
+        /// </remarks>
+        /// <param name="info">调用前必须填好 <c>dwOSVersionInfoSize</c> 的结构体。</param>
+        /// <returns>NTSTATUS；非 0 视为取版本失败，调用方要退回注册表或受清单影响的来源。</returns>
         [System.Runtime.InteropServices.DllImport("ntdll.dll")]
         private static extern int RtlGetVersion(ref OSVERSIONINFO info);
 
@@ -91,6 +110,20 @@ namespace DshLauncher
             return name + " " + major + "." + minor + "." + build + arch;
         }
 
+        /// <summary>
+        /// 部署第 1 步的系统门：判定当前机器能否继续自动部署。
+        /// </summary>
+        /// <remarks>
+        /// 两个出参的分工是调用方的分支依据，不是"级别高低"：
+        /// <paramref name="problem"/> 非空 = 硬性不支持，必须中止（非 Windows、32 位、明确低于 Win10）；
+        /// <paramref name="warning"/> 非空 = 放行但要在面板/日志里提一句（版本读不准、Win10 已过支持期）。
+        /// 两者都为 null 是唯一"完全没问题"的情形；判定不出问题时一律偏向放行 ——
+        /// 读不准版本不该拦住用户，真正的失败留给后续步骤去报。
+        /// 本方法自己吞掉所有异常（异常也转成 problem），调用方不必再包 try。
+        /// </remarks>
+        /// <param name="problem">不为 null 时表示必须中止的原因（面向用户的中文句子）。</param>
+        /// <param name="warning">不为 null 时表示"可以继续，但值得提醒"的说明。</param>
+        /// <returns>true = 可以继续部署（可能带 warning）；false = 应当中止。</returns>
         public static bool Supported(out string problem, out string warning)
         {
             problem = null;
@@ -151,9 +184,11 @@ namespace DshLauncher
     internal static class NetFetch
     {
         private const string ScriptName = "dsh-netfetch.js";
-        private static string _scriptPath;
+        private static string _scriptPath;      // 已落盘的脚本路径（进程内缓存；%TEMP% 里的文件不主动删除）
 
         /// <summary>node 是否可用（决定走哪条取数路径）。</summary>
+        /// <param name="cfg">用于定位 node 的配置（含自定义安装位置）。</param>
+        /// <returns>true = 已找到 node 可执行文件；查找本身抛异常时也按 false 处理。</returns>
         public static bool NodeUsable(AppConfig cfg)
         {
             try { return DshLocator.FindNode(cfg) != null; }
@@ -161,6 +196,15 @@ namespace DshLauncher
         }
 
         /// <summary>取一个文本内容（索引 / 校验文件 / npm view 之外的网页）。</summary>
+        /// <remarks>
+        /// node 优先、.NET 兜底：node 那条路返回空串或非 0 退出码（含超时的 -1）时静默降级到
+        /// <see cref="HttpGetString"/>。node 那条路自己包了 catch，.NET 这条会抛 ——
+        /// 所以本方法仍可能抛，由调用方决定"取不到就算了"还是"必须报错"。
+        /// </remarks>
+        /// <param name="cfg">用于定位 node 的配置。</param>
+        /// <param name="url">完整 URL，会原样作为脚本的第 1 个参数传给 node（不经 shell 解析）。</param>
+        /// <param name="timeoutMs">超时上限；node 路径交给 HiddenRunner，.NET 路径设给 HttpWebRequest。</param>
+        /// <returns>正文文本。</returns>
         public static string GetString(AppConfig cfg, string url, int timeoutMs)
         {
             if (NodeUsable(cfg))
@@ -183,6 +227,18 @@ namespace DshLauncher
         /// 下载到文件。默认用 .NET 的 WebClient（有字节级进度回调）；
         /// 失败时再用 node 重试一遍 —— 这条兜底正是为了绕开 Schannel 抽风。
         /// </summary>
+        /// <remarks>
+        /// 与 <see cref="GetString"/> 的优先顺序相反：这里 .NET 优先，因为只有 WebClient 才给得出
+        /// 字节级进度。<paramref name="dest"/> 已存在时直接覆盖。判定成功的标准不是"没抛异常"，
+        /// 而是"文件存在且长度大于 0" —— 传输中断会留下 0 字节的残留文件，必须当成失败。
+        /// 进度回调按 400ms 节流（简单的时间戳比较，不保证每次进度变化都报一次）。
+        /// </remarks>
+        /// <param name="cfg">用于定位 node（兜底路径要用）。</param>
+        /// <param name="url">下载地址。</param>
+        /// <param name="dest">目标文件路径，父目录必须已存在。</param>
+        /// <param name="progress">进度/降级提示回调，可为 null。</param>
+        /// <param name="timeoutMs">node 兜底路径的超时；.NET 那条走 WebClient 的默认超时。</param>
+        /// <returns>true = 目标文件已存在且非空。</returns>
         public static bool Download(AppConfig cfg, string url, string dest, LogHandler progress, int timeoutMs)
         {
             try
@@ -223,10 +279,19 @@ namespace DshLauncher
         }
 
         /// <summary>把取数脚本落到临时目录（只写一次），避免把带引号的 JS 塞进命令行。</summary>
+        /// <remarks>
+        /// 写文件用**不带 BOM** 的 UTF-8（脚本内容全是 ASCII，无 BOM 更省事）。
+        /// 文件名固定，多实例并发启动时会互相覆盖同名文件 —— 理论上存在"读到半截脚本"的窗口，
+        /// 但脚本只有几百字节且内容恒定，工程里接受这个风险，不加锁也不校验。
+        /// </remarks>
+        /// <returns>脚本的绝对路径。</returns>
         private static string EnsureScript()
         {
             if (!string.IsNullOrEmpty(_scriptPath) && File.Exists(_scriptPath)) return _scriptPath;
             string path = Path.Combine(Path.GetTempPath(), ScriptName);
+            // 退出码即错误分类：3=重定向超过 5 跳、4=HTTP 非 200、5=写文件失败、6=网络错误；
+            // 调用方只区分 0 / 非 0，细节要看 stderr。脚本内的 120s 是自保，
+            // 真正的上限由 HiddenRunner 的 timeoutMs 决定（超时它返回 -1 并杀掉 node）。
             const string js =
                 "const https=require('https'),http=require('http'),fs=require('fs');\n" +
                 "const url=process.argv[2], out=process.argv[3];\n" +
@@ -248,6 +313,19 @@ namespace DshLauncher
             return path;
         }
 
+        /// <summary>
+        /// .NET 侧的纯文本 GET：node 不可用、或 node 那条路失败时的兜底。
+        /// </summary>
+        /// <remarks>
+        /// 走的是系统 Schannel 证书栈 —— 正是 NetFetch 类型注释里说的"会按主机抽风"的那条路，
+        /// 所以它只配当兜底。<paramref name="timeoutMs"/> 同时设给 Timeout 与 ReadWriteTimeout
+        /// （连接与读写各算各的）。响应按 UTF-8 解码（StreamReader 默认还会识别并跳过 BOM）；
+        /// 非 2xx 会在 GetResponse 处抛 WebException，重定向交给 HttpWebRequest 的默认行为
+        /// （最多 50 跳）。
+        /// </remarks>
+        /// <param name="url">完整 URL。</param>
+        /// <param name="timeoutMs">连接与读写的超时上限（毫秒）。</param>
+        /// <returns>响应正文。</returns>
         public static string HttpGetString(string url, int timeoutMs)
         {
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
@@ -262,6 +340,12 @@ namespace DshLauncher
     }
 
     /// <summary>解析出来的 DSH 目标包（版本 + 完整性 + 来源）。</summary>
+    /// <remarks>
+    /// 纯数据载体，字段全部由 <c>VersionResolve</c> 填充。
+    /// <c>Integrity</c> 是 npm 的 dist.integrity（SRI 字符串），可能为空 —— 那只表示"这个源没给"，
+    /// 不代表校验可以跳过。<c>Downgrade</c> 不是解析结果，而是"本地缓存比目标新"的结论，
+    /// 由调用方决定要不要据此拒绝安装。
+    /// </remarks>
     internal class DshPackage
     {
         public string Version = "";
@@ -275,6 +359,19 @@ namespace DshLauncher
     /// <summary>语义化版本比较（主.次.修订 + 预发布段的数字感知比较）。</summary>
     internal static class SemVer
     {
+        /// <summary>
+        /// 比较两个版本号：a 小于 b 返回 -1，相等返回 0，a 大于 b 返回 1。
+        /// </summary>
+        /// <remarks>
+        /// 只比较"主.次.修订 + 预发布段"，不处理 +build 元数据（在本工具的用途里它不影响"要不要升级"，
+        /// 实际会被当成无法解析的段而归 0）。缺段按 0 补齐；两边的 v 前缀与首尾空白都会被吃掉。
+        /// 预发布段按 '.' 再切分：全数字段按数值比，其余按序数（忽略大小写）比，
+        /// 且数字段一律小于字母段 —— 这是 semver 的既定规则，别改成"按字符串比"。
+        /// null / 空串等同于 0.0.0（最低版本）。
+        /// </remarks>
+        /// <param name="a">左版本号，可带 v 前缀。</param>
+        /// <param name="b">右版本号，可带 v 前缀。</param>
+        /// <returns>-1 / 0 / 1。</returns>
         public static int Compare(string a, string b)
         {
             string[] pa = Split(a), pb = Split(b);
@@ -309,6 +406,9 @@ namespace DshLauncher
             return 0;
         }
 
+        /// <summary>取版本号的"数字核心"：去掉 v 前缀与首尾空白、砍掉 '-' 之后的预发布段，再按 '.' 切分。</summary>
+        /// <param name="v">原始版本串，可为 null。</param>
+        /// <returns>主/次/修订数字段（长度不定，缺段由调用方按 0 补）。</returns>
         private static string[] Split(string v)
         {
             if (string.IsNullOrEmpty(v)) return new string[0];
@@ -318,8 +418,10 @@ namespace DshLauncher
             return core.Split('.');
         }
 
+        /// <summary>把一段文本当数字读，读不出就是 0（空段、带 +build 的段都归到 0）。</summary>
         private static int Num(string s) { int n; return int.TryParse(s, out n) ? n : 0; }
 
+        /// <summary>整段是否全为 ASCII 数字（空串与 null 都不算）—— 决定该段按数值比还是按序数比。</summary>
         private static bool IsDigits(string s)
         {
             if (string.IsNullOrEmpty(s)) return false;
@@ -335,6 +437,22 @@ namespace DshLauncher
     /// </summary>
     internal static class VersionResolve
     {
+        /// <summary>
+        /// 解析出本次要安装的目标包：动态优先，固定版本兜底。
+        /// </summary>
+        /// <remarks>
+        /// 三条路径按顺序退让，任何一条成功就立刻停止：
+        /// ① 官方 GitHub Release（<c>QueryOfficial</c>）；
+        /// ② npm 上已发布版本里最大的那个（<c>QueryNpm</c>）；
+        /// ③ 全问不到就退回 config 里的固定版本，保证"总还能装出一个能用的东西"。
+        /// 走 ③ 会在日志里留一条 Warn —— 它意味着版本可能不是最新的，是排查问题的第一线索。
+        /// 解析完还会做一次**防降级判定**：本地缓存版本比目标新时打上 <c>Downgrade</c> 标记；
+        /// 本方法只判定不阻断，是否真的拒绝安装由调用方决定。
+        /// 不抛异常：网络侧的问题都被各个 Query 吞成 false。
+        /// </remarks>
+        /// <param name="cfg">配置（版本模式、固定版本、registry 都从这里取）。</param>
+        /// <param name="log">日志回调，可为 null。</param>
+        /// <returns>已填充的目标包；调用方要检查 <c>Downgrade</c>，以及三个字符串字段是否为空。</returns>
         public static DshPackage Resolve(AppConfig cfg, LogHandler log)
         {
             DshPackage p = new DshPackage();
@@ -464,6 +582,17 @@ namespace DshLauncher
         }
 
         /// <summary>确认某个确切版本在指定源上存在，并取它的 integrity。</summary>
+        /// <remarks>
+        /// 只认 npm 明确回报的版本号：<c>version</c> 字段必须与请求的版本一致（忽略引号与大小写），
+        /// 否则视为"这个源上没有" —— registry 镜像落后时正是这种情况，靠这一步把候选筛掉。
+        /// 走 npm-cli.js 而不是 .NET 的理由见 <see cref="NetFetch"/>。npm-cli.js 的位置按两种
+        /// npm 布局先后探测（独立安装 / node 自带），都不在就放弃。
+        /// </remarks>
+        /// <param name="cfg">用于定位 node。</param>
+        /// <param name="registry">registry 地址（以 --registry 传给 npm）。</param>
+        /// <param name="ver">要确认的确切版本号。</param>
+        /// <param name="integrity">该版本的 dist.integrity；源没给时为空串。</param>
+        /// <returns>true = 该源上确实有这个版本。</returns>
         private static bool QueryNpmExact(AppConfig cfg, string registry, string ver, out string integrity)
         {
             integrity = "";
@@ -492,6 +621,14 @@ namespace DshLauncher
             catch { return false; }
         }
 
+        /// <summary>单次正则匹配并取第 1 个捕获组；不匹配、无捕获组或正则本身出错都返回空串。</summary>
+        /// <remarks>
+        /// 这里是有意"拿不准就当没有"：上游 JSON 的结构一旦变化，宁可让上层回退到别的取数路径，
+        /// 也不要因为一个正则异常把整条解析链炸掉。调用方拿到空串要当成"没找到"。
+        /// </remarks>
+        /// <param name="text">待匹配文本。</param>
+        /// <param name="pattern">正则（本工程解析 JSON 一律用这种"定位 + 就近回溯"的做法）。</param>
+        /// <returns>第 1 个捕获组，或空串。</returns>
         private static string PickOne(string text, string pattern)
         {
             try
@@ -503,6 +640,16 @@ namespace DshLauncher
         }
 
         /// <summary>取指定源上「已发布版本里最大的那个」及其 integrity（经 node，不经 Schannel）。</summary>
+        /// <remarks>
+        /// 要跑两次 npm：先 <c>view versions</c> 拿到全部版本号自己挑最大，再对选中的版本取 dist.integrity。
+        /// 两次调用之间源上的内容理论上可能变，所以第二次回报的 <c>version</c> 优先于本地挑出的 best ——
+        /// 以 npm 说的为准，避免"挑的和取到的是两个版本"。任一步失败都返回 false，不做重试。
+        /// </remarks>
+        /// <param name="cfg">用于定位 node。</param>
+        /// <param name="registry">registry 地址。</param>
+        /// <param name="version">挑出的版本号（以 npm 回报为准）；失败时为空串。</param>
+        /// <param name="integrity">该版本的 dist.integrity；源没给时为空串。</param>
+        /// <returns>true = 取到了可用版本。</returns>
         private static bool QueryNpm(AppConfig cfg, string registry, out string version, out string integrity)
         {
             version = "";
@@ -552,6 +699,12 @@ namespace DshLauncher
         }
 
         /// <summary>本地 npx / 全局缓存里那份 DSH 的版本号（读它自己的 package.json）。</summary>
+        /// <remarks>
+        /// 纯只读探测：缓存入口找不到、package.json 不在、字段缺失、读取异常，一律返回 null，
+        /// 由调用方按"本地没有版本"处理（本工程里 null 与空串同义）。它不触发任何下载。
+        /// </remarks>
+        /// <param name="cfg">用于定位缓存目录的配置。</param>
+        /// <returns>版本号，或 null。</returns>
         public static string LocalCachedVersion(AppConfig cfg)
         {
             try
@@ -573,6 +726,13 @@ namespace DshLauncher
     internal static class NpmCacheProbe
     {
         /// <summary>npm 缓存根目录（经 node 问 npm config get cache；失败则用默认位置）。</summary>
+        /// <remarks>
+        /// 取输出的**最后一行非空文本**：npm 会先在 stdout 打警告，把真正的路径挤到后面。
+        /// 问不到（node 不在、npm-cli.js 不在、退出码非 0）就退回 %LOCALAPPDATA%\npm-cache，
+        /// 那是 npm 在 Windows 上的默认位置。本方法只报路径，不保证目录存在。
+        /// </remarks>
+        /// <param name="cfg">用于定位 node。</param>
+        /// <returns>缓存根目录的绝对路径（不保证存在）。</returns>
         public static string CacheRoot(AppConfig cfg)
         {
             try
@@ -604,6 +764,13 @@ namespace DshLauncher
         }
 
         /// <summary>缓存里 _cacache 与 _npx 两个子目录的总字节数。</summary>
+        /// <remarks>
+        /// 只算这两个目录：npm 拉包落在 _cacache，npx 的临时安装落在 _npx，其余子目录与拉取无关。
+        /// 单个文件读长度失败就跳过它（枚举与读取之间文件被 npm 挪走时会出现），
+        /// 所以这个数字是下限估计而不是精确值 —— 它只用来把拉取进度画得动起来。
+        /// </remarks>
+        /// <param name="cacheRoot">缓存根目录；为空或不存在时返回 0。</param>
+        /// <returns>总字节数。</returns>
         public static long SizeBytes(string cacheRoot)
         {
             if (string.IsNullOrEmpty(cacheRoot) || !Directory.Exists(cacheRoot)) return 0L;

@@ -8,48 +8,59 @@ using System.Windows.Forms;
 
 namespace DshLauncher
 {
+    /// <summary>一条日志记录：日志文件、界面日志面板与诊断包用的都是它。</summary>
     internal class LogEntry
     {
-        public DateTime Time;
-        public string Text;
-        public LogLevel Level;
+        public DateTime Time;   // 产生时刻（本地时间）
+        public string Text;     // 原始文案，可能很长，界面负责折行
+        public LogLevel Level;  // 级别，界面据此分色
     }
 
+    /// <summary>日志事件的载荷：只带一条记录，订阅方按级别自行渲染。</summary>
     internal class LogEventArgs : EventArgs
     {
         public LogEntry Entry;
         public LogEventArgs(LogEntry entry) { Entry = entry; }
     }
 
-    /// <summary>应用主体：托盘、窗口、服务三者的协调者。</summary>
+    /// <summary>应用主体：托盘、窗口、服务三者的协调者；它同时是 ApplicationContext，退出即进程结束。</summary>
+    /// <remarks>
+    /// 线程约定：窗体与托盘的一切操作都必须回到 UI 线程 —— 外部线程一律先经 _ui 这个消息泵锚点
+    /// BeginInvoke 再执行；服务日志/状态事件来自后台线程，同样不能直接碰控件。
+    /// 另有两条常驻后台线程：_showThread 等第二个实例的唤出信号，_watch 定时器每 4 秒巡检一次端口。
+    /// </remarks>
     internal class LauncherContext : ApplicationContext
     {
+        /// <summary>启动器版本。取自构建期生成的 BuildInfo，不要在源码里另写一份版本号。</summary>
         public static string Version { get { return BuildInfo.Version; } }
 
-        public AppConfig Config;
-        public DshServer Server;
+        public AppConfig Config;   // 全局唯一的配置实例：启动时载入，设置窗保存后回写
+        public DshServer Server;   // 服务进程管理器（外部已在跑的服务也由它记录状态）
 
         private readonly List<LogEntry> _history = new List<LogEntry>();
         private readonly object _historyGate = new object();
         private NotifyIcon _tray;
         private LauncherForm _form;
-        private System.Windows.Forms.Timer _watch;
-        private bool _exiting;
-        private bool _trayTipShown;
-        private bool _settingsAfterReveal;
-        private volatile bool _watchBusy;
-        private EventWaitHandle _showSignal;
-        private Thread _showThread;
+        private System.Windows.Forms.Timer _watch;   // 端口巡检：每 4 秒一次
+        private bool _exiting;   // 一旦置位，所有在途回调立即短路（避免退出途中又被唤出窗口）
+        private bool _trayTipShown;   // "已缩到托盘"气泡只弹一次
+        private bool _settingsAfterReveal;   // 开场动画收尾后再打开设置（构造期不能弹模态窗）
+        private volatile bool _watchBusy;   // 上一次巡检没跑完时跳过本次（探测含网络等待）
+        private EventWaitHandle _showSignal;   // 具名事件：第二个实例用它通知本实例"把窗口唤出来"
+        private Thread _showThread;            // 常驻等待线程（后台线程，随进程一起结束）
         private Control _ui;          // UI 线程消息泵锚点（跨线程操作必须经它中转）
-        private BootSplash _splash;
-        private UpdateInfo _update;
-        private DeployReport _envReport;
-        private Deployer _deployer;
+        private BootSplash _splash;   // 开场动画窗口（关闭时回调 RevealMainForm）
+        private UpdateInfo _update;   // 最近一次更新检查结果（启动时查一次，点更新按钮会再查）
+        private DeployReport _envReport;   // 环境体检结果（NeedsDeploy 为真时进部署模式）
+        private Deployer _deployer;   // 非 null 表示已进入部署模式（进度事件都挂在它身上）
+        // 四个一次性守卫：体检只排一次、部署模式只进一次、部署成功后的自动启服务只做一次、
+        // 安装位置每次运行最多问一次（用户用 ✕ 关掉视为"还没决定"，下次启动会再问）
         private bool _deployCheckStarted;
         private bool _deployModeEntered;
         private bool _deployStarting;
         private bool _installAskedThisRun;
 
+        /// <summary>日志广播（可能在任意线程上触发，订阅方负责切回 UI 线程）。</summary>
         public event EventHandler<LogEventArgs> LogProduced;
 
         /// <summary>更新检查结果（UI 的更新按钮据此变化）。</summary>
@@ -64,9 +75,18 @@ namespace DshLauncher
         /// <summary>主窗口（开启动画收尾时要淡入它）。</summary>
         public Form MainWindow { get { return _form; } }
 
+        /// <summary>常规入口：立即显示主窗口（开场动画那条路径用下面带 deferShow 的重载）。</summary>
         public LauncherContext(Args args) : this(args, false) { }
 
+        /// <summary>
+        /// 启动主体：建 UI 消息泵锚点 → 载入配置 → 起唤出线程与巡检定时器 → 检查更新 → 决定是否显示窗口。
+        /// </summary>
+        /// <param name="args">命令行参数：端口/工作目录的本次覆盖，以及是否自启、是否最小化、是否直接开设置。</param>
         /// <param name="deferShow">true = 先以全透明就位，等开启动画收尾时再淡入</param>
+        /// <remarks>
+        /// 构造函数里不能弹模态对话框（消息循环还没开始），凡是要等用户决定的步骤都排到消息循环启动之后
+        /// （见 ScheduleInstallPrompt、StartDeploymentCheck）。
+        /// </remarks>
         public LauncherContext(Args args, bool deferShow)
         {
             // 句柄必须在 UI 线程上创建：托盘线程要唤出窗口时，靠它把调用切回 UI 线程。
@@ -157,21 +177,36 @@ namespace DshLauncher
         /// </summary>
         private void ReconcileShortcuts()
         {
+            // ⚠️ 四步各自独立 try —— 以前是一行 catch 包住整条链，任何一步抛异常都会让
+            //    **后面三步静默不执行**（旧自启不退休、旧安装目录不清理、一致性也不核对），
+            //    而用户与日志都看不到，排障时根本查不出来。
             try
             {
                 string action = Shortcuts.ReconcileAutoStart(Config.AutoStart, AppPaths.ExePath, AppPaths.InstallDir);
                 if (!string.IsNullOrEmpty(action)) AddLog(action, LogLevel.Warn);
+            }
+            catch (Exception ex) { AddLog("自启项对齐失败：" + ex.Message, LogLevel.Warn); }
 
+            try
+            {
                 string legacy = Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
                 if (!string.IsNullOrEmpty(legacy)) AddLog(legacy, LogLevel.Dim);
+            }
+            catch (Exception ex) { AddLog("旧自启项处理失败：" + ex.Message, LogLevel.Warn); }
 
+            try
+            {
                 // 上一次迁移安装位置留下的旧副本，由本实例（新位置）清理
                 string cleaned = InstallLocation.CleanupPreviousInstall(Config);
                 if (!string.IsNullOrEmpty(cleaned)) AddLog(cleaned, LogLevel.Dim);
+            }
+            catch (Exception ex) { AddLog("旧安装位置清理失败：" + ex.Message, LogLevel.Warn); }
 
+            try
+            {
                 foreach (string p in Config.ConsistencyProblems()) AddLog(p, LogLevel.Warn);
             }
-            catch { }
+            catch (Exception ex) { AddLog("配置一致性核对失败：" + ex.Message, LogLevel.Warn); }
         }
 
         /// <summary>把「首次选择安装位置」排到消息循环启动之后（构造期不能直接弹模态框）。</summary>
@@ -219,6 +254,8 @@ namespace DshLauncher
         /// 落实安装位置。target 为空串 = 绿色免安装。
         /// 需要换目录时会复制程序本体、重建快捷方式，再以新位置重启启动器（DSH 服务不受影响）。
         /// </summary>
+        /// <param name="owner">对话框的宿主窗口；可为 null。</param>
+        /// <param name="target">目标目录；空串表示"绿色免安装（就地运行）"。</param>
         public void ApplyInstallLocation(IWin32Window owner, string target)
         {
             if (target != null && target.Length == 0)
@@ -250,6 +287,7 @@ namespace DshLauncher
 
         // ---------------- 部署检测与自动部署 ----------------
         /// <summary>环境体检：没部署过就进入自动部署（带进入动画）。</summary>
+        /// <remarks>体检要起子进程（node --version 等），必须丢到线程池上做，不能占着 UI 线程。</remarks>
         private void StartDeploymentCheck()
         {
             if (_deployCheckStarted || _exiting) return;
@@ -271,6 +309,10 @@ namespace DshLauncher
             });
         }
 
+        /// <summary>
+        /// 进入部署模式的唯一入口：窗口在托盘里时先不打扰用户，主窗可见才切界面并播过渡动画。
+        /// 动画自身失败也要继续进入部署模式 —— 动效不能挡住功能。
+        /// </summary>
         private void EnterDeployMode()
         {
             if (_exiting || _deployModeEntered) return;
@@ -298,6 +340,9 @@ namespace DshLauncher
             if (_form != null && !_form.IsDisposed) _form.EnterDeployMode();
         }
 
+        /// <summary>
+        /// 部署进度变化：同步部署面板；部署成功且还没启过服务时，退出部署模式并自动启动服务（只做一次）。
+        /// </summary>
         private void OnDeployChanged()
         {
             if (_form != null && !_form.IsDisposed) _form.SyncDeploy();
@@ -308,7 +353,7 @@ namespace DshLauncher
             StartServer();
         }
 
-        /// <summary>点「一键部署」。</summary>
+        /// <summary>点「一键部署」：没进部署模式就先进入，已在运行则直接忽略（不会起第二条部署线程）。</summary>
         public void StartDeployment()
         {
             if (_deployer == null) EnterDeployMode();
@@ -358,6 +403,10 @@ namespace DshLauncher
         }
 
         /// <summary>开启动画收尾：把主窗口恢复为不透明（并处理 --settings）。</summary>
+        /// <remarks>
+        /// 可能被调用两次（动画正常收尾与异常兜底两条路径），实现必须可重入。
+        /// 主窗展开之后才清理上一轮遗留的 .old 文件，并补上构造期不方便做的事（安装位置询问、部署体检）。
+        /// </remarks>
         public void RevealMainForm()
         {
             if (_ui != null && _ui.InvokeRequired)
@@ -401,14 +450,17 @@ namespace DshLauncher
         }
 
         // ---------------- 版本更新 ----------------
-        /// <summary>更新按钮：有可用更新就直接问是否更新，否则重新检查一次。</summary>
-        /// <summary>对话框 owner：主窗可见时挂主窗，否则屏幕居中。</summary>
+        /// <summary>对话框宿主窗口：主窗可见时挂主窗，否则返回 null（owner 为空时 CenterParent 退化为屏幕居中）。</summary>
         private IWin32Window DlgOwner
         {
             get { return (_form != null && !_form.IsDisposed && _form.Visible) ? (IWin32Window)_form : null; }
         }
 
         /// <summary>点「检查更新 / 更新」。</summary>
+        /// <remarks>
+        /// 每次点击都重新检查一遍（不信任启动时那份结果）。更新成功后重启自己并退出启动器，
+        /// 但**不停止服务** —— 正在跑的会话不该被一次版本升级打断。
+        /// </remarks>
         public void UpdateButtonClicked()
         {
             _update = UpdateCheck.Check();
@@ -450,6 +502,7 @@ namespace DshLauncher
         }
 
         // ---------------- 诊断日志导出 ----------------
+        /// <summary>导出诊断包，并在资源管理器里选中刚生成的文件（方便直接拖进对话框发出来）。</summary>
         public void ExportDiagnostics()
         {
             try
@@ -468,6 +521,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>打开日志所在位置：有日志文件就选中它，没有就直接打开日志目录。</summary>
         public void OpenLogFolder()
         {
             try
@@ -483,6 +537,10 @@ namespace DshLauncher
         }
 
         // ---------------- 日志 ----------------
+        /// <summary>
+        /// 记录一条日志：先写日志文件，再追加历史（超过 500 条时从头部砍掉 100 条），最后广播给界面。
+        /// 可在任意线程调用；订阅方抛异常只吞掉 —— 记日志本身不能成为崩溃点。
+        /// </summary>
         public void AddLog(string message, LogLevel level)
         {
             LogEntry entry = new LogEntry();
@@ -502,12 +560,14 @@ namespace DshLauncher
             if (h != null) { try { h(this, new LogEventArgs(entry)); } catch { } }
         }
 
+        /// <summary>取日志历史的快照副本（界面遍历重绘时不会与写入线程打架）。</summary>
         public List<LogEntry> LogHistory()
         {
             lock (_historyGate) { return new List<LogEntry>(_history); }
         }
 
         // ---------------- 托盘 ----------------
+        /// <summary>建托盘图标与右键菜单；每个菜单项都直接对应一个公开动作，便于对照排查。</summary>
         private void SetupTray()
         {
             _tray = new NotifyIcon();
@@ -533,6 +593,7 @@ namespace DshLauncher
             _tray.DoubleClick += delegate(object s, EventArgs e) { ShowForm(); };
         }
 
+        /// <summary>造一个带点击回调的托盘菜单项（统一构造方式，避免每项重复三行）。</summary>
         private static ToolStripMenuItem MenuItem(string text, EventHandler handler)
         {
             ToolStripMenuItem item = new ToolStripMenuItem(text);
@@ -540,6 +601,10 @@ namespace DshLauncher
             return item;
         }
 
+        /// <summary>
+        /// 把服务状态刷成托盘提示文字。StatusChanged 可能来自后台线程，先切回 UI 线程；
+        /// 托盘 ToolTip 有长度上限，超长会抛异常，这里统一截断并用 try 兜底。
+        /// </summary>
         private void UpdateTray()
         {
             if (_tray == null) return;
@@ -566,6 +631,7 @@ namespace DshLauncher
             try { _tray.Text = text; } catch { }
         }
 
+        /// <summary>第一次收进托盘时弹一次气泡，说明服务仍在后台跑（_trayTipShown 保证只弹一次）。</summary>
         public void NotifyHiddenToTray()
         {
             if (_exiting) return;
@@ -587,6 +653,13 @@ namespace DshLauncher
         }
 
         // ---------------- 主窗口 ----------------
+        /// <summary>
+        /// 显示主窗口（还没建过就现建一个）。窗体只能在 UI 线程上创建/显示，所以入口先做线程切换。
+        /// </summary>
+        /// <remarks>
+        /// 末尾的透明度看门狗专治"开启动画提前退出，主窗永久停在 Opacity=0"：
+        /// 那时窗口存在但看不见，Application.Run 也不会自己退出，用户只能去任务管理器杀进程。
+        /// </remarks>
         public void ShowForm()
         {
             if (_exiting) return;
@@ -602,12 +675,40 @@ namespace DshLauncher
                 _form = new LauncherForm(this);
             }
             _form.Show();
+
+            // 看门狗：开启动画那条路径先把主窗设成全透明，等 splash 的 Tick 走到终点才恢复。
+            // 那条路径一旦提前退出（Tick 抛异常、被提前关掉…），主窗就永久停在 Opacity=0 ——
+            // 用户拿到一个"看不见但存在"的窗口，Application.Run 也不会退出。这里做迟到兜底。
+            if (_form.Opacity < 1.0)
+            {
+                System.Windows.Forms.Timer wd = new System.Windows.Forms.Timer();
+                wd.Interval = 2000;
+                wd.Tick += delegate(object s, EventArgs e)
+                {
+                    wd.Stop();
+                    wd.Dispose();
+                    try
+                    {
+                        if (_form != null && !_form.IsDisposed && _form.Opacity < 1.0)
+                        {
+                            _form.Opacity = 1.0;
+                            AddLog("主窗透明度看门狗触发：已无条件恢复可见。", LogLevel.Warn);
+                        }
+                    }
+                    catch { }
+                };
+                wd.Start();
+            }
             if (_form.WindowState == FormWindowState.Minimized) _form.WindowState = FormWindowState.Normal;
             _form.Activate();
             try { _form.BringToFront(); } catch { }
         }
 
         // ---------------- 业务动作 ----------------
+        /// <summary>
+        /// 启动服务：先按配置自检，再交给 DshServer 异步启动。
+        /// 已经在启动/运行/停止中的一律不重复动作；配置有误时提示，并回退到"探测端口上是否已有服务"。
+        /// </summary>
         public void StartServer()
         {
             if (Server.Status == ServerStatus.Starting || Server.Status == ServerStatus.Running) return;
@@ -625,6 +726,11 @@ namespace DshLauncher
             Server.StartAsync(Config);
         }
 
+        /// <summary>
+        /// 停止服务。外部拉起的服务不走这里，改走"识别 + 强制终止"；confirm 为真时先弹确认框。
+        /// 真正的停止动作（taskkill + 等端口释放）放到后台线程，避免卡住界面。
+        /// </summary>
+        /// <param name="confirm">true = 停止前先让用户确认（托盘菜单直接点「停止服务」时为 true）。</param>
         public void StopServer(bool confirm)
         {
             if (Server.Status == ServerStatus.External)
@@ -647,6 +753,10 @@ namespace DshLauncher
             t.Start();
         }
 
+        /// <summary>
+        /// 打开 Web 界面。服务状态停留在"已停止/失败"时会先探一次端口：
+        /// 探测结果不是 DSH 就提示用户先启动，不把一个打不开的页面丢给浏览器。
+        /// </summary>
         public void OpenUi()
         {
             string url = Server.OpenUrl;
@@ -702,6 +812,7 @@ namespace DshLauncher
         /// 识别并强制终止当前端口上的服务（可能是别人拉起的）。
         /// 识别 → 确认 → 从同族树根 taskkill /T /F → 复查 →（可选）立即重启。
         /// </summary>
+        /// <param name="preferRestart">true = 终止后立刻重启服务（对应托盘里的「重启服务（强制）」）。</param>
         public void ForceStopExternal(bool preferRestart)
         {
             if (_ui != null && _ui.InvokeRequired)
@@ -821,6 +932,11 @@ namespace DshLauncher
         }
 
         /// <summary>清扫残留：列出本机所有 DSH 进程族，确认后全部强制终止。</summary>
+        /// <remarks>
+        /// 列表里会**排除本启动器自己拉起的服务**：否则"清扫残留"会顺手把正在跑的服务一起杀掉，
+        /// 而用户以为自己清的只是残留。列表里连命令行一起给出 —— 这是一次"全部终止"的确认，
+        /// 用户必须看得到自己要杀的到底是什么。
+        /// </remarks>
         public void CleanupResiduals()
         {
             if (_ui != null && _ui.InvokeRequired)
@@ -849,6 +965,17 @@ namespace DshLauncher
                 ConfirmDialog.Info(DlgOwner, "CLEAN / 清扫残留", "没有发现残留",
                     "本机没有扫描到残留的 DSH 进程。", null, null);
                 return;
+            }
+
+            // 先把"本启动器自己拉起的服务"摘出去：它是我们自己的进程，不该出现在"清扫残留"里
+            // （否则一键全杀会把正在跑的服务也杀掉，而用户以为清的是"残留"）。
+            int ownPid = Server != null ? Server.OwnPid : 0;
+            if (ownPid > 0)
+            {
+                int before = roots.Count;
+                roots.RemoveAll(delegate(ProcInfo q) { return q.Pid == ownPid || q.RootPid == ownPid; });
+                if (roots.Count != before)
+                    AddLog("清扫列表已排除本启动器自己拉起的服务（PID " + ownPid + "）。", LogLevel.Dim);
             }
 
             List<string> list = new List<string>();
@@ -908,6 +1035,10 @@ namespace DshLauncher
             DetectExternal();
         }
 
+        /// <summary>
+        /// 打开设置窗（模态）。保存后要重放动效档位并写盘；「卸载…」用 DialogResult.Abort 这个
+        /// 非常规约定传出来；安装位置搬迁必须等模态窗关掉之后再做（否则重启启动器时会压着一个模态窗）。
+        /// </summary>
         public void OpenSettings(IWin32Window owner)
         {
             string pending = null;
@@ -965,6 +1096,7 @@ namespace DshLauncher
         }
 
         /// <summary>服务就绪：先播接入过渡动画（卡片铺满主窗口），再真正打开 Web 界面。</summary>
+        /// <remarks>事件来自启动线程，先切回 UI 线程再碰窗口；没开"自动打开界面"就在这里停住。</remarks>
         private void OnServiceServing()
         {
             if (_exiting) return;
@@ -987,6 +1119,7 @@ namespace DshLauncher
         /// **探测放后台线程**：HTTP 最长 2.5 秒，绝不能在 UI 线程上等——
         /// 启动时它正好卡在开场动画的第一帧前面，会把动画起手吃掉。
         /// </summary>
+        /// <remarks>本启动器自己的服务正在启动/运行时直接返回 —— 那种情况下端口上当然是 DSH，不必再探。</remarks>
         private void DetectExternal()
         {
             if (Server.Status == ServerStatus.Running || Server.Status == ServerStatus.Starting) return;
@@ -1016,6 +1149,10 @@ namespace DshLauncher
             });
         }
 
+        /// <summary>
+        /// 每 4 秒的端口巡检：外部服务掉了就摘掉状态；我们没在跑而端口上却有服务，就接管显示。
+        /// 探测含网络等待，整体丢到线程池；_watchBusy 保证同一时刻只有一次巡检在跑。
+        /// </summary>
         private void WatchTick()
         {
             if (_exiting || _watchBusy) return;
@@ -1041,6 +1178,10 @@ namespace DshLauncher
         }
 
         // ---------------- 退出 ----------------
+        /// <summary>
+        /// 点「退出启动器」。服务在跑且归我们管时会先问"是否连服务一起停"；
+        /// 在确认框上点取消 = 连启动器也不退（用户改主意了）。
+        /// </summary>
         public void ExitApp()
         {
             if (_exiting) return;
@@ -1059,6 +1200,10 @@ namespace DshLauncher
         }
 
         /// <summary>收尾退出；更新重启时走 stopService=false，服务不受影响。</summary>
+        /// <remarks>
+        /// 先置 _exiting 让所有在途的异步回调短路，再依次收掉服务、巡检定时器、托盘、主窗、
+        /// 消息泵锚点与唤出信号，最后 ExitThread 结束 ApplicationContext。
+        /// </remarks>
         private void Shutdown(bool stopService)
         {
             if (_exiting) return;
@@ -1075,6 +1220,7 @@ namespace DshLauncher
     }
 
     /// <summary>托盘菜单配色（档案终端：暖白底、细线、暖褐选中）。</summary>
+    /// <remarks>颜色一律取自 Theme，随主题走；这些属性会被 ToolStrip 频繁读取，这里只做映射不做计算。</remarks>
     internal class ArchiveColorTable : ProfessionalColorTable
     {
         public override Color MenuItemSelected { get { return Theme.Panel; } }
@@ -1091,6 +1237,7 @@ namespace DshLauncher
         public override Color SeparatorLight { get { return Theme.PanelHi; } }
     }
 
+    /// <summary>托盘菜单的绘制器：只改菜单项文字颜色（选中时用琥珀色），其余交给基类。</summary>
     internal class ArchiveMenuRenderer : ToolStripProfessionalRenderer
     {
         public ArchiveMenuRenderer() : base(new ArchiveColorTable()) { }

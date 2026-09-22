@@ -20,6 +20,7 @@ namespace DshLauncher
         private bool _running;
         private Color _signal = Theme.SignalBusy;
 
+        /// <summary>构造：开双缓冲并登记 30fps 动效；未部署时才可见，此时部署进度本身就在动。</summary>
         public DeployPanel()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -28,12 +29,25 @@ namespace DshLauncher
             Anim.Track(this, 1);
         }
 
+        /// <summary>销毁前注销动效登记，免得全局时钟继续往已销毁的控件上发重绘。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing) Anim.Untrack(this);
             base.Dispose(disposing);
         }
 
+        /// <summary>刷新部署面板，并据此调整刷新率。</summary>
+        /// <param name="track">左上角的轨道标注行。</param>
+        /// <param name="headline">当前这一步的标题（体检 / 下载 / 校验…）；null 按空串处理。</param>
+        /// <param name="summary">底部结论摘要；null 按空串处理，空串则不占位。</param>
+        /// <param name="signal">状态色，决定标题与信号条的颜色。</param>
+        /// <param name="steps">步骤清单；null 按空列表处理。</param>
+        /// <param name="running">是否正在部署 —— 只有部署中才会在右上角显示百分比。</param>
+        /// <param name="progress">总体进度 0..1，仅在 <paramref name="running"/> 为真时显示。</param>
+        /// <remarks>
+        /// 帧率：部署中 30fps，其余约 10fps。步骤清单不做拷贝，调用方若复用同一个
+        /// <see cref="List{T}"/> 对象、只改里面元素的状态，这里也能看到（绘制只读 <c>_steps</c>）。
+        /// </remarks>
         public void SetState(string track, string headline, string summary, Color signal,
                              List<DeployStep> steps, bool running, double progress)
         {
@@ -48,6 +62,12 @@ namespace DshLauncher
             Invalidate();
         }
 
+        /// <summary>自绘：细线框 + 状态标记条 + 部署进度百分比 + 步骤清单 + 底部结论。</summary>
+        /// <remarks>
+        /// 只画前 8 步（<c>_steps</c> 里排在前面的优先），行高按可用高度自适应，
+        /// 保证步骤再多也不越过底部摘要那一行。每步的状态标记为：进行中 <c>&gt;</c>、完成 <c>OK</c>、
+        /// 失败 <c>!!</c>、跳过 <c>--</c>，未知状态画一个 <c>·</c>。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;

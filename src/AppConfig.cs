@@ -9,21 +9,21 @@ namespace DshLauncher
     /// <summary>启动器配置，保存为 %APPDATA%\DSH Launcher\config.ini（人类可读、可手改）。</summary>
     internal class AppConfig
     {
-        public string Workspace = "";
-        public int Port = 3080;
-        public string LaunchMode = "npx";          // npx | direct
-        public bool VerifyIntegrity = true;
-        public string PinnedVersion = "0.1.5-rc.2";
+        public string Workspace = "";              // DSH 打开的工作目录；启动前会校验它存在（见 Validate）
+        public int Port = 3080;                    // 本地服务端口，只在启动前校验范围
+        public string LaunchMode = "npx";          // npx | direct（Load 会把别的取值一律归一到 npx）
+        public bool VerifyIntegrity = true;        // npx 方式下是否核验下载源完整性；极速模式用不到这一项
+        public string PinnedVersion = "0.1.5-rc.2";   // 固定版本号；VersionMode=pinned 时生效，latest 两条路都拿不到时也退回它（下一行是它的摘要）
         public string PinnedIntegrity = "sha512-8Xc8hCQHcIWRmTCVU/xZdp6/qMsWMeAd2ObChKDEsfhUPJFXx6H0lgeb1DxUMD86HZrrVN+1bCvn1ppjZ/fOxw==";
-        public string Registry = "https://registry.npmmirror.com";
-        public bool AutoOpenBrowser = true;
-        public bool EdgeAppMode = false;
-        public bool CloseToTray = true;
-        public bool AutoStart = false;
-        public string NodePath = "";
-        public string DshEntry = "";
-        public bool BootAnimation = true;
-        public bool TransitionAnimation = true;
+        public string Registry = "https://registry.npmmirror.com";   // 首选 npm 源
+        public bool AutoOpenBrowser = true;        // 服务就绪后自动打开浏览器
+        public bool EdgeAppMode = false;           // 用 Edge 的应用模式打开界面（--app=url）；找不到 Edge 就回落默认浏览器
+        public bool CloseToTray = true;            // 关窗口只是最小化到托盘，不退出
+        public bool AutoStart = false;             // 开机自启（启动文件夹快捷方式，静默启动）
+        public string NodePath = "";               // 上次探测到的 node.exe；文件还在就直接用，省一次探测
+        public string DshEntry = "";               // 上次找到的 DSH 本地入口（极速模式直接启动它）
+        public bool BootAnimation = true;          // 开启动画（螺旋授权环）
+        public bool TransitionAnimation = true;    // 「打开界面」的过渡动画开关；关掉或窗口在托盘里就直接打开（见 LauncherContext.OpenUiWithTransition）
 
         /// <summary>
         /// DSH 版本策略：latest = 动态取官方最新可安装版（默认，对齐旧安装脚本）；
@@ -55,11 +55,13 @@ namespace DshLauncher
         /// <summary>绿色免安装：程序就在自己所在目录里跑，不做任何安装动作。</summary>
         public bool IsPortable { get { return string.IsNullOrEmpty(InstallDir); } }
 
+        /// <summary>配置目录 %APPDATA%\DSH Launcher（Save 时会自动创建）。</summary>
         public static string ConfigDir
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DSH Launcher"); }
         }
 
+        /// <summary>配置文件的完整路径：config.ini（UTF-8 无 BOM，人类可读可手改）。</summary>
         public static string ConfigPath { get { return Path.Combine(ConfigDir, "config.ini"); } }
 
         /// <summary>建议的安装位置（只在选择框里作为「使用默认位置」这一项出现，绝不静默使用）。</summary>
@@ -70,6 +72,10 @@ namespace DshLauncher
                 "Programs", "DSH Launcher");
         }
 
+        /// <summary>
+        /// 首次运行时的默认工作目录：按候选顺序取第一个**存在**的目录，都不存在才退回用户目录。
+        /// 第一个候选是开发机上的写死路径，别的机器上不存在会自动顺延，不影响使用。
+        /// </summary>
         public static string DefaultWorkspace()
         {
             string[] candidates = new string[]
@@ -86,6 +92,11 @@ namespace DshLauncher
             return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         }
 
+        /// <summary>
+        /// 读 config.ini。文件不存在直接返回默认配置；单个键解析失败只影响那个键；
+        /// 读取中途抛异常（文件损坏、权限不足）时就此打住，**已经解析到的键仍然生效**，不重置为默认值。
+        /// 键名不区分大小写、按第一个等号切分，未知键一律忽略 —— 旧版本写的多余键不会导致失败。
+        /// </summary>
         public static AppConfig Load()
         {
             AppConfig cfg = new AppConfig();
@@ -135,12 +146,15 @@ namespace DshLauncher
         /// 写盘。**返回是否真的写成功** —— 以前是 void + 裸 catch，于是配置写失败时
         /// 调用方照样打「设置已保存」，用户关掉设置窗、下次启动却读回旧值（设置凭空消失）。
         /// </summary>
+        /// <returns>真的落盘了才返回 true；失败会写一条 [Warn] 到日志并返回 false，调用方必须检查。</returns>
         public bool Save()
         {
             try
             {
                 Directory.CreateDirectory(ConfigDir);
                 StringBuilder sb = new StringBuilder();
+                // 文件头这些 # 注释行只是写给手改配置的人看的；真正被 Load() 认的键名在下面逐行写。
+                // 新增配置项时，这里和 Load() 的 switch 要一起加，否则这份"自带文档"会骗人。
                 sb.AppendLine("# DSH 启动器配置（改动后重启启动器生效）");
                 sb.AppendLine("# workspace   DSH 打开的工作目录");
                 sb.AppendLine("# launchmode  npx = 经 npm 启动（可校验完整性，推荐）；direct = 直接启动本地已缓存版本（最快）");
@@ -184,6 +198,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>解析整数；不是合法整数就用 fallback，绝不抛异常（配置坏一个键不该拦启动）。</summary>
         private static int ParseInt(string s, int fallback)
         {
             int v;
@@ -191,6 +206,7 @@ namespace DshLauncher
             return fallback;
         }
 
+        /// <summary>解析布尔：1/true/yes/on 为真，0/false/no/off 为假（不区分大小写），其余用 fallback。</summary>
         private static bool ParseBool(string s, bool fallback)
         {
             string v = s.Trim().ToLowerInvariant();
@@ -199,6 +215,7 @@ namespace DshLauncher
             return fallback;
         }
 
+        /// <summary>启动前的必需校验：工作目录存在、端口在 1..65535。返回空列表表示通过。</summary>
         public List<string> Validate()
         {
             List<string> problems = new List<string>();
@@ -210,8 +227,9 @@ namespace DshLauncher
         }
 
         /// <summary>
-        /// 配置与磁盘的一致性核对（只报告，不拦截启动）。
+        /// 配置与磁盘的一致性核对（**只报告，不拦截启动**，也从不抛异常）。
         /// 覆盖两类真实踩过的坑：安装目录被删/被挪之后快捷方式全失效、自启项变孤儿。
+        /// 返回的每条都是可以直接展示给用户的中文说明。
         /// </summary>
         public List<string> ConsistencyProblems()
         {

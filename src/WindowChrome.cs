@@ -9,16 +9,26 @@ namespace DshLauncher
     /// <summary>无边框窗口的拖动支持。</summary>
     internal static class WindowChrome
     {
+        /// <summary>释放当前线程的鼠标捕获；不先释放，下面那条非客户区消息会被当成"拖动已有捕获的窗口"而被忽略。</summary>
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
 
+        /// <summary>向窗口过程投递消息；这里只用来把按下伪装成标题栏按下。</summary>
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+        /// <summary>WM_NCLBUTTONDOWN：非客户区左键按下。系统收到它才会按"点的是哪一块"去分发。</summary>
         private const int WM_NCLBUTTONDOWN = 0x00A1;
+        /// <summary>HTCAPTION：命中标题栏 —— 于是拖动、双击最大化、拖到屏幕边缘贴边全都由系统照常处理。</summary>
         private const int HTCAPTION = 2;
 
         /// <summary>把当前鼠标按下当作"按住标题栏"，交给系统去做拖动/贴边。</summary>
+        /// <param name="form">要被拖动的窗体；为 null 直接返回。</param>
+        /// <remarks>
+        /// 必须在鼠标按下的事件里调用，系统的拖动循环会就地接管到左键松开为止。
+        /// 窗体尚未创建句柄时 <c>Handle</c> 会现创建句柄，所以别在构造期间就调它。
+        /// 整个调用包在 try 里：拖动只是便利功能，失败也不该把异常抛进控件的消息处理里。
+        /// </remarks>
         public static void BeginDrag(Form form)
         {
             if (form == null) return;
@@ -34,6 +44,7 @@ namespace DshLauncher
     /// <summary>无边框窗口右上角的自绘按钮（最小化 / 关闭 / 齿轮设置 / 问号帮助），细线字形。</summary>
     internal class ChromeButton : Control
     {
+        /// <summary>字形种类：最小化、关闭、齿轮（设置）、问号（帮助）。窗口没有系统标题栏，这几笔全靠自绘。</summary>
         public enum GlyphKind { Minimize, Close, Gear, Help }
 
         private readonly GlyphKind _kind;
@@ -42,6 +53,7 @@ namespace DshLauncher
         /// <summary>按下即触发（不用 Click）：窗口未激活时，第一下点击会被系统用于激活而吞掉 Click。</summary>
         public event EventHandler Invoked;
 
+        /// <summary>按字形种类构造；背景用面板色，与标题栏同色，视觉上是一块无缝的区域。</summary>
         public ChromeButton(GlyphKind kind)
         {
             _kind = kind;
@@ -52,9 +64,15 @@ namespace DshLauncher
             TabStop = false;
         }
 
+        /// <summary>进入悬停：整块按钮填暖褐（关闭键填危险色），字形反白。</summary>
         protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        /// <summary>离开悬停：恢复面板色 + 深灰字形。</summary>
         protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
 
+        /// <summary>
+        /// 左键按下即回调 <see cref="Invoked"/>：不等 Click。
+        /// 窗口未激活时第一次点击会被系统用来激活窗口，Click 就丢了 —— 那样用户得点两下才关得掉。
+        /// </summary>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -65,6 +83,11 @@ namespace DshLauncher
             base.OnMouseDown(e);
         }
 
+        /// <summary>自绘：底色（悬停时整块高亮）→ 按种类画字形（横线 / 叉 / 齿轮 / 问号）。</summary>
+        /// <remarks>
+        /// 直线字形一律关抗锯齿、用 1px 细线，和这套界面的细线语言一致；
+        /// 齿轮与问号是曲线，在那两个方法内部临时开抗锯齿并还原。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;

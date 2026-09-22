@@ -73,13 +73,26 @@ namespace DshLauncher
         private const double EnterX1 = 0.22, EnterY1 = 1.0, EnterX2 = 0.36, EnterY2 = 1.0;
         private const double ExitX1 = 0.40, ExitY1 = 0.0, ExitX2 = 1.0, ExitY2 = 1.0;
 
+        /// <summary>入场缓动：强减速（曲线见上方注释）。<paramref name="p"/> 是 0..1 的线性时间进度。</summary>
         public static double EaseIn(double p) { return CubicBezier(EnterX1, EnterY1, EnterX2, EnterY2, p); }
+        /// <summary>退场缓动：加速离场，比入场更急。</summary>
         public static double EaseOut(double p) { return CubicBezier(ExitX1, ExitY1, ExitX2, ExitY2, p); }
 
         /// <summary>
         /// 三次贝塞尔求值：先解 x(t) = x 得到参数 t，再取 y(t)。
         /// 牛顿迭代为主、二分兜底（曲线可能有一段导数接近 0，纯牛顿会跑飞）。
         /// </summary>
+        /// <param name="x1">第一个控制点的 x（须在 0..1 内，否则曲线在 x 上不单调）。</param>
+        /// <param name="y1">第一个控制点的 y，可以超出 0..1（回弹 / 过冲效果就靠这个）。</param>
+        /// <param name="x2">第二个控制点的 x。</param>
+        /// <param name="y2">第二个控制点的 y。</param>
+        /// <param name="x">横轴上的取样点。</param>
+        /// <returns>该横坐标处的曲线值 y(t)。</returns>
+        /// <remarks>
+        /// 只接受 0..1 的 <paramref name="x"/>：越界直接返回 0.0 / 1.0，函数内部不做夹紧。
+        /// 调用方通常传 <c>elapsed/span</c>，所以这个边界就是"动画尚未开始 / 已经结束"。
+        /// 牛顿迭代最多 8 次；残差仍大于 1e-4 时改用 24 次二分，保证任何形状的曲线都能解出来。
+        /// </remarks>
         public static double CubicBezier(double x1, double y1, double x2, double y2, double x)
         {
             if (x <= 0.0) return 0.0;
@@ -107,12 +120,14 @@ namespace DshLauncher
             return Bez(y1, y2, (lo + hi) * 0.5);
         }
 
+        /// <summary>三次贝塞尔在单轴上的取值：固定端点 0 与 1，<paramref name="a"/> / <paramref name="b"/> 是两个控制点。</summary>
         private static double Bez(double a, double b, double t)
         {
             double u = 1.0 - t;
             return 3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t;
         }
 
+        /// <summary><see cref="Bez"/> 对 <paramref name="t"/> 的导数，供牛顿迭代用。</summary>
         private static double BezSlope(double a, double b, double t)
         {
             double u = 1.0 - t;
@@ -121,17 +136,25 @@ namespace DshLauncher
 
         // ---------------- 曲线 ----------------
 
+        /// <summary>把进度夹到 0..1；NaN 会原样穿过（比较恒为 false），调用方不必指望这里兜住 NaN。</summary>
         public static double Clamp01(double p) { return p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p); }
 
-        /// <summary>smoothstep：t²(3−2t)。</summary>
+        /// <summary>smoothstep：t²(3−2t)。两端导数为 0，用来做"起步和收尾都不生硬"的显形。</summary>
         public static double Smooth(double p) { double t = Clamp01(p); return t * t * (3.0 - 2.0 * t); }
 
-        /// <summary>smootherstep：t³(10 + t(−15 + 6t))。</summary>
+        // smootherstep：t³(10 + t(−15 + 6t))。
+        // TODO(待确认): 这原本是对某个 smootherstep 实现的文档注释，但该实现已不存在；
+        // 因后面紧接另一段 /// 文档块，编译器判定本段无主并报 CS1587，故降级为普通注释。
+        // 若确认该实现是有意删除，可直接删掉这四行。
 
 
         /// <summary>
         /// 把总时钟的某个区间归一化成 0..1。版式里每个元素都有自己的起笔时刻，全靠这个函数。
         /// </summary>
+        /// <param name="elapsedMs">本窗入场开始至今的毫秒数。</param>
+        /// <param name="start">该元素的起笔时刻（毫秒，相对入场起点）。</param>
+        /// <param name="span">该元素从起笔到就位的时长（毫秒）。</param>
+        /// <returns>0..1；<paramref name="span"/> 不为正时退化成阶跃：到点即 1，否则 0。</returns>
         public static double Window(double elapsedMs, double start, double span)
         {
             if (span <= 0.0) return elapsedMs >= start ? 1.0 : 0.0;
@@ -139,6 +162,7 @@ namespace DshLauncher
         }
 
         /// <summary>同上，但过一遍入场缓动（元素位移 / 擦入用它，别用线性的）。</summary>
+        /// <returns>缓动后的 0..1，返回值与线性的 <see cref="Window"/> 一一对应。</returns>
         public static double WindowEased(double elapsedMs, double start, double span)
         {
             return EaseIn(Window(elapsedMs, start, span));
@@ -146,34 +170,26 @@ namespace DshLauncher
 
         // ---------------- 临界阻尼弹簧（帧率无关，原库 motion.ts 的 damp）----------------
 
-        public struct Spring
-        {
-            public double Value;
-            public double Velocity;
-        }
-
-        public const double DampReduced = 35.0;
-
-        public static void Damp(ref Spring s, double target, double rate, double dt)
-        {
-            double delta = s.Value - target;
-            double impulse = s.Velocity + rate * delta;
-            double decay = Math.Exp(-rate * dt);
-            s.Value = target + (delta + impulse * dt) * decay;
-            s.Velocity = (s.Velocity - impulse * rate * dt) * decay;
-        }
-
         // ---------------- 错峰 ----------------
 
 
+        /// <summary>错峰延迟的上限（毫秒）：元素再多也不让排在后面的等到 600ms 以上。</summary>
         public const int StaggerCap = 600;
 
+        /// <summary>第 <paramref name="index"/> 个元素该晚多少毫秒起笔。</summary>
+        /// <returns><c>index * step</c>，但不超过 <see cref="StaggerCap"/>。</returns>
         public static int StaggerDelay(int index, int step)
         {
             int d = index * step;
             return d > StaggerCap ? StaggerCap : d;
         }
 
+        /// <summary>错峰网格里第 <paramref name="index"/> 格的显形进度（已经过 <see cref="Smooth"/>）。</summary>
+        /// <param name="elapsedMs">本窗入场开始至今的毫秒数。</param>
+        /// <param name="index">元素序号，决定它排在第几个起笔。</param>
+        /// <param name="step">相邻元素之间的起笔间隔（毫秒）。</param>
+        /// <param name="spanMs">单个元素自己的显形时长（毫秒）。</param>
+        /// <returns>0..1；起笔前（local 为负）由 <see cref="Smooth"/> 夹紧成 0，不会回卷。</returns>
         public static double Cell(double elapsedMs, int index, int step, int spanMs)
         {
             double local = (elapsedMs - StaggerDelay(index, step)) / (double)Math.Max(1, spanMs);
@@ -182,6 +198,11 @@ namespace DshLauncher
 
         // ---------------- 档位 ----------------
 
+        /// <summary>把配置里的档位字符串解析成枚举。</summary>
+        /// <returns>
+        /// 空、null 或认不出来的值一律返回 <see cref="MotionLevel.Full"/>（认得出的只有 "off" / "brief" / "full"，
+        /// 比对前会 Trim 并转小写），所以档位解析不会失败、也不会让界面没有动效。
+        /// </returns>
         public static MotionLevel ParseLevel(string s)
         {
             if (string.IsNullOrEmpty(s)) return MotionLevel.Full;
@@ -194,16 +215,8 @@ namespace DshLauncher
             }
         }
 
-        public static string LevelName(MotionLevel lv)
-        {
-            switch (lv)
-            {
-                case MotionLevel.Off: return "关闭";
-                case MotionLevel.Brief: return "精简";
-                default: return "完整";
-            }
-        }
-
+        /// <summary><see cref="ParseLevel"/> 的逆运算：写回配置文件用的字符串键。</summary>
+        /// <returns>"off" / "brief" / "full"（除 Off、Brief 之外都归到 "full"）。</returns>
         public static string LevelKey(MotionLevel lv)
         {
             switch (lv)
@@ -217,7 +230,7 @@ namespace DshLauncher
         /// <summary>该档位是否要画版式（四角括号 / 章节导轨 / 标签块）。只有完整档。</summary>
         public static bool WantsLayout(MotionLevel lv) { return lv == MotionLevel.Full; }
 
+        /// <summary>该档位下大窗的入场时长（毫秒）。</summary>
         public static int EnterMs(MotionLevel lv) { return lv == MotionLevel.Full ? EnterFull : EnterBrief; }
-        public static int ExitMs(MotionLevel lv) { return lv == MotionLevel.Full ? ExitFull : ExitBrief; }
     }
 }

@@ -29,8 +29,14 @@ namespace DshLauncher
             public string En = "";    // 灰色大写英文小字
         }
 
+        /// <summary>宿主窗口（动画就是拨它的 Opacity 与 Location）。</summary>
         private readonly Form _form;
+        /// <summary>本窗的动效档位：关闭 / 精简 / 完整，决定时长与是否做版式。</summary>
         private readonly MotionLevel _level;
+        /// <summary>
+        /// 宿主是不是对话框。**这一条不是分类癖好，是两条时间轴的分水岭**：
+        /// 对话框 300ms 入场且不做版式，大窗 600ms 且逐笔就位；混用会踩到构造函数注释里那个关不掉窗的坑。
+        /// </summary>
         private readonly bool _dialog;
 
         private readonly Timer _timer;              // 入场期间 16ms（≈60fps），结束即停 —— 不常驻
@@ -39,6 +45,7 @@ namespace DshLauncher
 
         private Point _baseLocation;
         private bool _baseCaptured;
+        /// <summary>退场播完后、真正 Close 之前要执行的动作；本类同样不负责给 _afterExit 赋值（由调用方在需要时注入）。</summary>
         private Action _afterExit;
         private DialogResult _pendingResult = DialogResult.None;
 
@@ -103,11 +110,15 @@ namespace DshLauncher
 
         public List<Section> Sections { get { return _sections; } }
 
-        /// <summary>章节标题的起始 x（导轨右侧）。</summary>
+        // 章节标题的起始 x（导轨右侧）。
+        // TODO(待确认): 该说明原本属于某个成员（疑似「章节标题 x」常量），但对应成员已不存在；
+        // 若保留为 /// 文档注释，编译器会把它顺延挂到下面的 Busy 属性上，使 Busy 的文档
+        // 变成一句与它无关的话。故降级为普通注释，并另行为 Busy 补一条准确的文档。
 
 
         // ---------------- 对外状态（供 OnPaint 用）----------------
 
+        /// <summary>是否正在播放且尚未退场：入场进行中为 true，退场开始后即变为 false。</summary>
         public bool Busy { get { return _running && !_exiting; } }
         public int ElapsedMs { get { return (int)_elapsed; } }
         public bool WantsLayout { get { return !_dialog && UiMotion.WantsLayout(_level); } }
@@ -135,7 +146,12 @@ namespace DshLauncher
         /// <summary>整窗淡入进度（已过缓动）。</summary>
         public double Enter { get { return UiMotion.EaseIn(_elapsed / Math.Max(1, EnterDuration)); } }
 
-        /// <summary>第 i 支四角括号的进度（左上 → 右上 → 左下 → 右下）。</summary>
+        /// <summary>
+        /// 第 i 支四角括号的进度（左上 → 右上 → 左下 → 右下），错峰由 <see cref="UiMotion.BracketStep"/> 给。
+        /// </summary>
+        /// <remarks>
+        /// 不参与版式或正在退场时直接返回 1 —— 让元素瞬移到终态，绝不留下半截版式。
+        /// </remarks>
         public double Bracket(int i)
         {
             if (!WantsLayout || _exiting) return _exiting ? 1.0 : (_level == MotionLevel.Off ? 1.0 : Enter);
@@ -228,12 +244,12 @@ namespace DshLauncher
             return a;
         }
 
-        /// <summary>入场是否已经跑完（大窗用来决定要不要继续按帧重画）。</summary>
-        public bool EnterDone { get { return !_running || _elapsed >= EnterDuration; } }
-
         // ---------------- 入场 ----------------
 
-        /// <summary>在 OnShown 里调用（必须先起后台活儿，再播动画）。</summary>
+        /// <summary>
+        /// 在 OnShown 里调用：先起后台活儿，再播动画 —— 动画不能挡住真正要跑的初始化。
+        /// 关闭档直接 <see cref="SnapToEnd"/> 瞬移，不建任何时间轴。
+        /// </summary>
         public void BeginEnter()
         {
             _entered = true;
@@ -255,6 +271,9 @@ namespace DshLauncher
 
         /// <summary>
         /// 拦截关闭：先播 200ms 退场再真关。返回 true 表示"本次关闭已被接管"（调用方直接 return）。
+        ///
+        /// 只接管用户主动发起的关闭；系统关机 / 任务管理器结束 / 应用整体退出这些
+        /// <c>CloseReason</c> 一律放行 —— 那些场合系统在等我们，绝不能拖 200ms。
         /// 有意做成**只有第一次关闭会被拦**：退场途中再点一次就立即关掉，绝不把窗口卡住。
         /// </summary>
         public bool InterceptClose(FormClosingEventArgs e)
@@ -315,6 +334,7 @@ namespace DshLauncher
             double p = ms <= 0.0 ? 1.0 : UiMotion.Clamp01(_exitElapsed / ms);
             double e = UiMotion.EaseOut(p);      // 退场用另一条曲线：加速离场
 
+            // 位移与透明度都由同一条进度 e 驱动：位置往下沉多少，画面就变透明多少
             ShiftWindow((int)Math.Round(Theme.S(UiMotion.OffsetOut) * e));
             SetOpacity(1.0 - e);
 
@@ -331,7 +351,13 @@ namespace DshLauncher
             }
         }
 
-        /// <summary>把窗口整体位移（设计像素）：入场从 +OffsetIn 升上来，退场再往下沉。</summary>
+        /// <summary>
+        /// 把窗口整体位移（设计像素）：入场从 +OffsetIn 升上来，退场再往下沉。
+        /// </summary>
+        /// <remarks>
+        /// 位移是**相对 _baseLocation 的绝对偏移**，不是每帧累加 —— 这样中途打断也能直接跳到位。
+        /// 基准位置在第一次调用时抓取。
+        /// </remarks>
         private void ShiftWindow(int dy)
         {
             try
@@ -342,6 +368,7 @@ namespace DshLauncher
             catch { }
         }
 
+        /// <summary>设置整窗不透明度（内部再钳一次 0..1，防调用方给越界值）。</summary>
         private void SetOpacity(double v)
         {
             try { _form.Opacity = UiMotion.Clamp01(v); } catch { }
@@ -368,6 +395,7 @@ namespace DshLauncher
             _timer.Stop();
         }
 
+        /// <summary>只负责停表并释放定时器（本类不是 <c>IDisposable</c> 实现，仅按约定命名）。</summary>
         public void Dispose()
         {
             try { _timer.Stop(); _timer.Dispose(); } catch { }

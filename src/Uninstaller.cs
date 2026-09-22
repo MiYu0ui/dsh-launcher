@@ -138,6 +138,11 @@ namespace DshLauncher
     {
         // ---------------- 路径 ----------------
 
+        /// <summary>DSH 的用户数据根目录（凭据、会话、插件数据都在这里面）。</summary>
+        /// <remarks>
+        /// 以环境变量 DSH_HOME 为准；没设时才退回 %USERPROFILE%\.dsh。
+        /// 只有环境变量非空才算数，空串会被当成"没设"。
+        /// </remarks>
         public static string DshHome
         {
             get
@@ -148,6 +153,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>npx 的缓存根目录（%LOCALAPPDATA%\npm-cache\_npx），DSH 程序包就装在它的子目录下。</summary>
         public static string NpxCacheRoot
         {
             get
@@ -158,6 +164,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>npm 全局包目录（%APPDATA%\npm）。整目录属于用户，只有 node_modules\@deepseek-ai 这一层在删除白名单内。</summary>
         public static string NpmGlobalRoot
         {
             get
@@ -166,24 +173,30 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>壁纸引擎插件的数据目录；是否随 DSH 一起删由 IncludeWallpaper 开关决定。</summary>
         public static string WallpaperData
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh-wallpaper-engine"); }
         }
 
+        /// <summary>Mnemon 插件的记忆数据目录（含文档与运行时记忆，属私密数据）。</summary>
         public static string MnemonData
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".mnemon"); }
         }
 
+        /// <summary>Hindsight 插件的配置与日志目录（同样受 IncludeMemory 开关控制）。</summary>
         public static string HindsightData
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".hindsight"); }
         }
 
+        /// <summary>启动器的配置目录（config.ini 所在处）。</summary>
         public static string LauncherConfigDir { get { return AppConfig.ConfigDir; } }
+        /// <summary>启动器的数据目录（日志与备份），与配置目录分开以便卸载时能各自保留或删除。</summary>
         public static string LauncherDataDir { get { return AppPaths.DataDir; } }
 
+        /// <summary>早期版本把启动器装在这里（%LOCALAPPDATA%\Programs\DSH Launcher），属历史残留副本。</summary>
         public static string LauncherOldProgramsDir
         {
             get
@@ -194,6 +207,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>桌面目录：备份目录、卸载报告与导出清单的落盘位置（当前用户即使用户改了桌面位置也跟随）。</summary>
         public static string DesktopDir
         {
             get { return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); }
@@ -201,10 +215,12 @@ namespace DshLauncher
 
         // ---------------- 识别：哪些 npx 缓存目录是 DSH 的 ----------------
 
-        /// <summary>
-        /// _npx 下每个子目录逐个查身份，只认含 @deepseek-ai/dsh 的那些。
-        /// **绝不能整目录删** —— 实测本机 4 个目录里只有 2 个是 DSH，另两个共 489 MB 是别人的包。
-        /// </summary>
+        /// <summary>在 _npx 下逐个识别属于 DSH 的缓存目录。</summary>
+        /// <param name="foreignDirs">输出参数：_npx 下所有**不属于 DSH**的子目录，调用方只能列出它们、绝不能删。</param>
+        /// <returns>含 @deepseek-ai/dsh 的子目录；_npx 不存在或读目录失败时返回空列表（失败不抛，卸载流程继续）。</returns>
+        /// <remarks>
+        /// 必须逐个目录查身份，不能整目录删 —— 实测本机 4 个目录里只有 2 个是 DSH，另两个共 489 MB 是别人的包。
+        /// </remarks>
         public static List<string> FindDshNpxDirs(out List<string> foreignDirs)
         {
             List<string> dsh = new List<string>();
@@ -222,6 +238,7 @@ namespace DshLauncher
             return dsh;
         }
 
+        /// <summary>判断一个 _npx 缓存目录是不是 DSH 的：以包清单或入口脚本的存在为准（读不到就当不是，宁可不删）。</summary>
         private static bool IsDshNpxDir(string dir)
         {
             try
@@ -236,9 +253,14 @@ namespace DshLauncher
 
         // ---------------- 硬护栏：这些永远不删 ----------------
 
+        /// <summary>硬护栏路径的清单，但当前**没有任何代码读写它**：真正的拦截逻辑在 IsAllowed 里逐条判断。</summary>
+        // TODO(待确认): 这个字段全项目只此一处出现（既无人写入也无人读取），疑似旧版护栏的残留；
+        // 确认为死代码后可以删除，或在 IsAllowed 里改为引用它，二者取其一。
         private static readonly List<string> _protected = new List<string>();
 
-        /// <summary>记录"不会动"的东西（只用于展示与自检，删除路径根本不会经过它们）。</summary>
+        /// <summary>列出被硬护栏挡住的路径，仅供界面与报告展示"这些不会动"。</summary>
+        /// <param name="cfg">当前配置，用来取工作区路径；传 null 时跳过工作区那一项。</param>
+        /// <returns>全部标记为 Skip 的条目；它们**不在删除计划的任何一条路径上**，加进来只是为了让用户看到自己没被误伤。</returns>
         public static List<UninstallTarget> Protected(AppConfig cfg)
         {
             List<UninstallTarget> list = new List<UninstallTarget>();
@@ -267,6 +289,8 @@ namespace DshLauncher
         }
 
         /// <summary>Node 是否装在"我们的部署会用的位置"（用于判断这一项能不能提供给你勾）。</summary>
+        /// <summary>判断 Node 是不是装在"我们自己的部署会用的位置"（%ProgramFiles%\nodejs 或 %LOCALAPPDATA%\Programs\nodejs）。</summary>
+        /// <returns>是则返回 true；路径非法或规范化失败时返回 false（即按用户自己装的处理）。</returns>
         public static bool IsOurNodeDir(string dir)
         {
             try
@@ -289,7 +313,16 @@ namespace DshLauncher
 
         // ---------------- 计划 ----------------
 
-        /// <summary>生成计划（会清点体积，可能耗时几秒，请放在后台线程调用）。</summary>
+        /// <summary>按卸载范围与开关生成一份完整的卸载计划。</summary>
+        /// <param name="cfg">当前启动器配置，用于取工作区、安装目录等路径。</param>
+        /// <param name="mode">卸载范围，决定哪些目标会进入删除集合。</param>
+        /// <param name="opt">可选开关（插件数据、快捷方式、残留副本、回收站与否等），只影响计划里各项的 Action。</param>
+        /// <param name="log">进度文字回调，可为 null。</param>
+        /// <returns>计划对象，已算好删除项数与字节数。</returns>
+        /// <remarks>
+        /// 体积清点是递归扫盘，可能耗时几秒，**必须在后台线程调用**。
+        /// 本方法只生成计划、不删任何东西：所有删除动作都发生在用户确认之后的 Execute 里。
+        /// </remarks>
         public static UninstallPlan Build(AppConfig cfg, UninstallMode mode, UninstallOptions opt, LogHandler log)
         {
             UninstallPlan p = new UninstallPlan();
@@ -492,9 +525,16 @@ namespace DshLauncher
         private static readonly Dictionary<string, PathStats> _stats =
             new Dictionary<string, PathStats>(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>清空体积缓存。删除前扫出来的数字在删除后就作废了，收尾时必须调用。</summary>
         public static void ClearStats() { _stats.Clear(); }
 
-        /// <summary>清点一个路径（结果缓存，避免切换方案时反复扫盘）。</summary>
+        /// <summary>清点一个路径的体积与文件数，结果带缓存。</summary>
+        /// <param name="path">文件或目录的完整路径。目录会递归统计。</param>
+        /// <returns>统计结果对象；不存在时 Exists 为 false，读取失败则保持着零值（不抛异常）。</returns>
+        /// <remarks>
+        /// 缓存按完整路径 OrdinalIgnoreCase 命中，用于避免切换卸载方案时反复扫同一个目录。
+        /// 代价是**结果会过期** —— 调用方在真正删除前/后要自行 ClearStats()，否则会拿着旧体积算进度。
+        /// </remarks>
         public static PathStats Stat(string path)
         {
             PathStats s;
@@ -537,11 +577,18 @@ namespace DshLauncher
 
         // ---------------- 执行 ----------------
 
-        /// <summary>
-        /// 执行计划。返回报告文本；同时给出成功/失败计数。
+        /// <summary>按计划执行删除，并返回一份可直接落盘的文本报告。</summary>
+        /// <param name="plan">要执行的计划；只有 Action 为 Delete 且确实存在的项会被动手。</param>
+        /// <param name="opt">执行期选项：BackupPrivate 决定是否先备份私密小文件，Permanent 决定送不送回收站。</param>
+        /// <param name="log">逐项日志回调，可为 null。</param>
+        /// <param name="onProgress">进度回调，可为 null。</param>
+        /// <param name="okCount">输出参数：删除成功的项数。</param>
+        /// <param name="failCount">输出参数：删除失败的项数。失败**不会**中断整批，逐项继续。</param>
+        /// <returns>报告正文（已删除 / 已保留 / 没有动过的东西 / 成功失败计数），调用方负责写入磁盘。</returns>
+        /// <remarks>
         /// onProgress 在「每一项开始前」与「每一项结束后」各回调一次，**可能在工作线程上** ——
-        /// 调用方负责 marshal 回 UI 线程。传 null 表示不需要进度。
-        /// </summary>
+        /// 调用方负责 marshal 回 UI 线程。
+        /// </remarks>
         public static string Execute(UninstallPlan plan, UninstallOptions opt, LogHandler log,
                                      Action<UninstallProgress> onProgress,
                                      out int okCount, out int failCount)
@@ -649,6 +696,15 @@ namespace DshLauncher
             return report.ToString();
         }
 
+        /// <summary>删除单个目标；目录里若包含"正在运行的自己"则走收尾删除的特殊路径。</summary>
+        /// <param name="t">待删除目标，IsDirectory 决定按目录还是按文件处理。</param>
+        /// <param name="permanent">true = 不经回收站。</param>
+        /// <param name="error">输出参数：失败原因，成功时为空串。</param>
+        /// <returns>是否已删干净。**路径本来就不存在也算成功**，这样重复执行不会误报失败。</returns>
+        /// <remarks>
+        /// 第一件事是过 IsAllowed 白名单护栏，任何不在白名单内的路径一律拒绝（报告"内部护栏拒绝删除该路径"），
+        /// 以免计划之外的路径被删。整目录删除失败时退化为逐项删除，见 DeleteDirFallback。
+        /// </remarks>
         private static bool DeleteTarget(UninstallTarget t, bool permanent, out string error)
         {
             error = "";
@@ -683,10 +739,16 @@ namespace DshLauncher
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        /// <summary>
-        /// 整目录删除的兜底：直接删目录失败时（目录里有文件被占用），退化成逐项删除，
-        /// 把清不掉的那些如实报出来 —— 不能让"有文件在跑"导致整批一个都没删。
-        /// </summary>
+        /// <summary>整目录删除失败后的兜底：退化成逐项删除，尽量把能删的都删掉。</summary>
+        /// <param name="dir">整删失败的目录。</param>
+        /// <param name="permanent">true = 不经回收站。</param>
+        /// <param name="firstError">整删时拿到的错误，用于拼进最终说明。</param>
+        /// <param name="error">输出参数：合并后的失败说明（含剩余未删项的名字）。</param>
+        /// <returns>目录最终已不存在时返回 true；还剩东西就返回 false，让调用方计入失败。</returns>
+        /// <remarks>
+        /// 触发条件是目录里有文件被占用（典型是正在运行的 exe）。**不能让"有文件在跑"导致整批一个都没删**，
+        /// 所以这里逐项尝试；实在删不掉的留在原处，但把名字如实报出来。只有目录真的空了才删目录本身。
+        /// </remarks>
         private static bool DeleteDirFallback(string dir, bool permanent, string firstError, out string error)
         {
             error = "";
@@ -722,10 +784,14 @@ namespace DshLauncher
             return false;
         }
 
-        /// <summary>
-        /// 回收站配额预警：Windows 的回收站有容量上限，装不下时带 FOF_ALLOWUNDO 的删除
-        /// 会被**静默改成永久删除**。这里按各盘总量的 5%（Windows 默认配额）估算。
-        /// </summary>
+        /// <summary>估算各盘的待删体积是否超过回收站配额，超了就给出预警文案。</summary>
+        /// <param name="plan">计划；只统计 Action 为 Delete 且存在、体积大于 0 的项。</param>
+        /// <returns>预警文案，或 null 表示没有风险 / 无法判断。</returns>
+        /// <remarks>
+        /// Windows 的回收站有容量上限，装不下时带 FOF_ALLOWUNDO 的删除会被**静默改成永久删除** ——
+        /// 用户以为还能还原，其实没有。这里按各盘总量的 5%（Windows 默认配额）估算，只提醒、不阻止。
+        /// 盘子取不到容量等异常一律吞掉返回 null：预警宁可漏报，也不能把卸载流程卡住。
+        /// </remarks>
         public static string RecycleCapacityWarning(UninstallPlan plan)
         {
             try
@@ -759,6 +825,8 @@ namespace DshLauncher
             catch { return null; }
         }
 
+        /// <summary>把字节数格式化成人类可读的尺寸（B / KB / MB / GB）。</summary>
+        /// <remarks>单位与小数位跟 UninstallTarget.SizeText 保持一致；卸载窗也复用这一份，避免两处各写一遍导致显示口径不同。</remarks>
         internal static string Human(long b)   // 卸载窗也用这一份，别再各写一遍
         {
             if (b >= 1073741824L) return (b / 1073741824.0).ToString("0.00") + " GB";
@@ -767,10 +835,14 @@ namespace DshLauncher
             return b + " B";
         }
 
-        /// <summary>
-        /// 白名单护栏：只允许删本类识别出来的那些位置的子路径。
-        /// 任何"意外传入"的路径（比如工作区、盘根、用户目录本身）都会被拒绝。
-        /// </summary>
+        /// <summary>删除白名单护栏：只有本类识别出来的位置才允许删。</summary>
+        /// <param name="path">待校验路径，可能来自计划，也可能来自不该来的地方。</param>
+        /// <returns>允许删除返回 true；路径为空、过短、是盘根 / 用户目录 / 工作区之一，或规范化时抛异常，都返回 false。</returns>
+        /// <remarks>
+        /// 这是 DeleteTarget 的第一道也是最后一道防线，"意外传入"的路径（工作区、盘根、用户目录本身）一律拒绝。
+        /// 长度小于 8 的路径直接判负，是为了挡住 ""、"C:\" 这类短路径在拼接判断里被误放行。
+        /// 另外 npm 全局包目录只在**正好是 node_modules\@deepseek-ai 这一层**时才放行，好让 NpmGlobalRoot 整体仍属用户。
+        /// </remarks>
         private static bool IsAllowed(string path)
         {
             try
@@ -812,6 +884,7 @@ namespace DshLauncher
 
         // ---------------- 送回收站 / 永久删除 ----------------
 
+        /// <summary>shell32 的 SHFileOperation 参数结构。字段顺序与长度必须与 Win32 声明严格一致。</summary>
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct SHFILEOPSTRUCT
         {
@@ -832,9 +905,18 @@ namespace DshLauncher
         private const ushort FOF_SILENT = 0x0004;
         private const ushort FOF_NOCONFIRMATION = 0x0010;
         private const ushort FOF_ALLOWUNDO = 0x0040;
-        private const ushort FOF_NOERRORUI = 0x0400;
+        private const ushort FOF_NOERRORUI = 0x0400;   // 出错不弹系统对话框：失败原因由本类自己回报给用户
 
-        /// <summary>用 shell 删除（默认进回收站；permanent=true 时永久删除）。</summary>
+        /// <summary>用 shell 删除一个文件或目录（默认进回收站；permanent=true 时永久删除）。</summary>
+        /// <param name="path">文件或目录路径。</param>
+        /// <param name="permanent">true 时不带 FOF_ALLOWUNDO，文件直接从磁盘移除、无法从回收站还原。</param>
+        /// <param name="error">输出参数：失败原因，成功时为空串。</param>
+        /// <returns>删掉或确认已不存在返回 true。</returns>
+        /// <remarks>
+        /// 走 SHFileOperation 而不是 Directory.Delete，是为了拿到回收站语义与资源管理器一致的删除行为。
+        /// 它有个坑：**返回 0 也不代表真删掉了**（占用中的文件会被跳过且不报错），所以成功后必须复查路径，
+        /// 只剩空壳的目录再补一次目录删除。pFrom 必须以双 NUL 结尾，这是该 API 的约定。
+        /// </remarks>
         private static bool ShellDelete(string path, bool permanent, out string error)
         {
             error = "";
@@ -869,7 +951,14 @@ namespace DshLauncher
 
         // ---------------- 备份 ----------------
 
-        /// <summary>把凭据与配置这类小文件复制到桌面一个带时间戳的文件夹里。</summary>
+        /// <summary>把凭据与配置这类小文件复制到桌面一个带时间戳的文件夹里，作为不可逆删除前的保险。</summary>
+        /// <param name="plan">当前计划；目录名会带上执行时刻，避免多次卸载互相覆盖。</param>
+        /// <returns>备份清单文本（含备份目录与逐个文件），或 null 表示没备份到任何东西 / 备份失败。</returns>
+        /// <remarks>
+        /// 只在文件确实存在时才复制，所以"没有凭据"的新机器会返回 null，而不是留下一个空文件夹。
+        /// 目录里一个文件都没有时也返回 null，但**已经建出来的空目录不会回收** —— 卸载流程不宜在这里再抛异常。
+        /// 备份文件名去掉前导点（.credentials.yaml 落成 credentials.yaml），方便用户在资源管理器里直接看到。
+        /// </remarks>
         public static string BackupPrivate(UninstallPlan plan)
         {
             try
@@ -909,6 +998,10 @@ namespace DshLauncher
 
         // ---------------- 报告与自我卸载 ----------------
 
+        /// <summary>把卸载报告写到桌面（DSH卸载报告-时间戳.txt）。</summary>
+        /// <param name="text">报告正文，直接来自 Execute 的返回值。</param>
+        /// <returns>报告文件的完整路径，或 null 表示写盘失败。</returns>
+        /// <remarks>带 BOM 的 UTF-8：报告里有中文路径，记事本按系统默认编码打开会乱码。</remarks>
         public static string WriteReport(string text)
         {
             try
@@ -920,7 +1013,8 @@ namespace DshLauncher
             catch { return null; }
         }
 
-        /// <summary>在资源管理器里定位文件（与「导出诊断日志」同一手法）。</summary>
+        /// <summary>在资源管理器里定位文件。</summary>
+        /// <remarks>用 explorer 的 /select 参数打开所在目录并选中该文件；路径必须带引号，否则含空格的路径会被拆错。</remarks>
         public static void RevealInExplorer(string filePath)
         {
             try
@@ -933,6 +1027,7 @@ namespace DshLauncher
         }
 
         /// <summary>打开任务管理器（让用户自己核对还有没有残留进程）。</summary>
+        /// <remarks>卸载完成后可能仍有被占用的文件，这里只负责把工具递到用户手上，不做判断。</remarks>
         public static void OpenTaskManager()
         {
             try
@@ -944,10 +1039,14 @@ namespace DshLauncher
             catch { }
         }
 
-        /// <summary>
-        /// 延迟删除"正在运行的自己"：起一个隐藏的 cmd，等本进程退出后删掉 exe 与空目录。
-        /// 卸载启动器时必须用它 —— 运行中的 exe 是删不掉的。
-        /// </summary>
+        /// <summary>安排"本进程退出后再删掉正在运行的自己"：起一个隐藏 cmd，延迟删除 exe 与随后的空目录。</summary>
+        /// <param name="exePath">当前正在运行的启动器 exe。</param>
+        /// <param name="dir">exe 所在目录；传空串则只删 exe、不动目录。</param>
+        /// <remarks>
+        /// 卸载启动器时必须走这条路 —— 运行中的 exe 删不掉，DeleteTarget 会先把同目录里能删的都删掉，
+        /// 再把 exe 交给这里收尾。延迟用 ping 而不是 timeout：`timeout` 在无控制台的隐藏窗口里会直接失败。
+        /// cmd 与删除动作都不可见，任何异常静默吞掉：此时进程即将退出，也没有更好的补救手段。
+        /// </remarks>
         public static void ScheduleSelfDelete(string exePath, string dir)
         {
             try

@@ -11,6 +11,8 @@ namespace DshLauncher
     /// </summary>
     internal class LauncherForm : Form
     {
+        // 版式基准（设计像素）：绘制与控件定位共用同一组常量，实际像素由 Theme.S() 按 DPI 缩放得到 ——
+        // 不要在这些数字上再乘一遍缩放系数，也不要在下面的代码里写裸像素。
         private const int DesignW = 780;
         private const int HeaderH = 106;
         private const int PadX = 30;
@@ -25,7 +27,7 @@ namespace DshLauncher
         private readonly LauncherContext _ctx;
         private StatusPanel _status;
         private DeployPanel _deploy;
-        private bool _deployMode;
+        private bool _deployMode;         // true = 部署面板顶掉了状态面板，主按钮语义随之变成"一键部署"
         private RingIndicator _ring;
         private FlatButton _btnStart;
         private FlatButton _btnOpen;
@@ -41,11 +43,22 @@ namespace DshLauncher
         private ChromeButton _btnHelp;
         private bool _gearHover;
         private bool _helpHover;
-        private Rectangle _gearLabelRect;
-        private Rectangle _helpLabelRect;
-        private string _lastLog = "";
-        private bool _allowClose;
+        private Rectangle _gearLabelRect;   // 「设置」二字的命中区（二字是画上去的，不是控件，只能手动命中）
+        private Rectangle _helpLabelRect;   // 「帮助」二字的命中区，同上
+        private string _lastLog = "";     // 最近一条日志：启动过程中拿来当状态面板的副标题
+        private bool _allowClose;         // true = 这次关闭是真退出，不再走"隐藏到托盘"那条分支
 
+        /// <summary>
+        /// 建主界面：先搭控件（<c>BuildUi</c>），再接事件，最后同步一次初始状态。
+        /// </summary>
+        /// <remarks>
+        /// 构造函数里就登记了全局动效（<see cref="Anim"/>），并在 <c>Dispose</c> 里注销 ——
+        /// 定时器持有窗体引用，注销是"这块界面已经不存在"的明确交接
+        /// （它自己也会剔除已销毁的控件，但收尾不该指望别人替你做）。
+        /// 登记的区域只有三条会动的窄带（绿边高光、章节线、页脚线）：别改成整窗，
+        /// 30fps 的全窗重画在低端机上是肉眼可见的卡。
+        /// </remarks>
+        /// <param name="ctx">应用上下文，不为 null；界面上的每个动作都转发给它。</param>
         public LauncherForm(LauncherContext ctx)
         {
             _ctx = ctx;
@@ -62,12 +75,22 @@ namespace DshLauncher
             });
         }
 
+        /// <summary>注销全局动效，再交给基类释放控件树。</summary>
+        /// <param name="disposing">true = 走托管释放路径；只有这种情形才需要注销动效。</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing) Anim.Untrack(this);
             base.Dispose(disposing);
         }
 
+        /// <summary>
+        /// 一次性搭出全部控件并接好事件。
+        /// </summary>
+        /// <remarks>
+        /// 本类只管界面：每个 Click 都直接转给 <see cref="LauncherContext"/>，不在这里做业务判断。
+        /// 窗口是无边框的，所以最小化/关闭/拖动都由自绘按钮（<see cref="ChromeButton"/>）
+        /// 与 <see cref="WindowChrome.BeginDrag"/> 接管，系统标题栏一概不提供。
+        /// </remarks>
         private void BuildUi()
         {
             SuspendLayout();
@@ -137,6 +160,7 @@ namespace DshLauncher
             _btnExport = MakeButton("导出诊断日志", PadX + 576, 144, FootRule + 8, 28, false);
             _btnExport.Click += delegate(object s, EventArgs e) { _ctx.ExportDiagnostics(); };
 
+            // 先给一个静态初值垫底（免得首帧空白），真正的状态随后由 SyncFromServer 填
             _status.SetState("STATUS / 运行状态", "未运行", "", Theme.SignalIdle, _ctx.Config.Workspace, "");
 
             // 自绘窗口按钮（无边框后由它们接管最小化/关闭）
@@ -156,6 +180,9 @@ namespace DshLauncher
 
             // 齿轮 + 「设置」二字：放在右上角品牌锁排的左边。
             // 几何由 BrandCluster 统一算，和 OnPaint 里画标签/署名/标志用的是同一套测量，不会对不齐。
+            // 量字要真实字体度量，所以借一个 Graphics；这段（以及下面的帮助按钮）**必须排在
+            // AllowTransparency 之后** —— 任何提前把窗口句柄建出来的动作，都会让之后改
+            // AllowTransparency 变成句柄重建。
             _btnGear = new ChromeButton(ChromeButton.GlyphKind.Gear);
             using (Graphics gg = CreateGraphics())
             {
@@ -204,6 +231,8 @@ namespace DshLauncher
         /// 右侧品牌锁排的横向布局（从右往左排）。**绘制与控件定位共用它** ——
         /// 两处各算一套的话，字体或缩放一变就会错位。
         /// </summary>
+        /// <param name="g">用于量字的 Graphics；每次调用都现量，不缓存结果。</param>
+        /// <returns>各元素的设备像素坐标与尺寸：BuildUi 用它定位控件，OnPaint 用它画同一串元素。</returns>
         private BrandBox BrandCluster(Graphics g)
         {
             BrandBox b = new BrandBox();
@@ -238,11 +267,21 @@ namespace DshLauncher
             get
             {
                 CreateParams cp = base.CreateParams;
+                // 类样式只在注册窗口类时生效，所以只能在这里加 —— 句柄建好之后再改 ClassStyle 是没有效果的
                 cp.ClassStyle |= 0x00020000;   // CS_DROPSHADOW
                 return cp;
             }
         }
 
+        /// <summary>
+        /// 鼠标按下：先试两处"画上去的文字"，都没命中再当作按标题栏拖动。
+        /// </summary>
+        /// <remarks>
+        /// 「设置」「帮助」二字与齿轮/问号图标是一组，但二字不是控件（OnPaint 直接画的），
+        /// 所以命中判定只能靠 <c>_gearLabelRect</c> / <c>_helpLabelRect</c> 手工做。
+        /// 两个矩形在 BuildUi 里由 <c>BrandCluster</c> 量出来，与绘制用的是同一套几何。
+        /// </remarks>
+        /// <param name="e">鼠标参数；只用左键。</param>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -263,6 +302,14 @@ namespace DshLauncher
             if (e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
+        /// <summary>按设计像素造一个扁平按钮并挂到窗体上（不接 Click，接线留给调用方）。</summary>
+        /// <param name="text">按钮文字。</param>
+        /// <param name="x">设计像素左边界。</param>
+        /// <param name="w">设计像素宽度。</param>
+        /// <param name="y">设计像素上边界。</param>
+        /// <param name="h">设计像素高度。</param>
+        /// <param name="primary">true = 主按钮：常态做刻度呼吸，会常驻登记全局动效。</param>
+        /// <returns>新建的按钮实例。</returns>
         private FlatButton MakeButton(string text, int x, int w, int y, int h, bool primary)
         {
             FlatButton b = new FlatButton();
@@ -274,6 +321,12 @@ namespace DshLauncher
             return b;
         }
 
+        /// <summary>把上下文的"状态变化"与"产生日志"两条事件接到本窗上。</summary>
+        /// <remarks>
+        /// 日志只在 Starting 阶段驱动界面重绘：启动过程要用最近一条日志当副标题，
+        /// 运行期每行日志都刷界面纯属浪费（日志本身只落文件，不进界面）。
+        /// 两个事件的触发线程不保证是 UI 线程，所以回调里一律先经 InvokeRequired 分流。
+        /// </remarks>
         private void HookContext()
         {
             _ctx.Server.StatusChanged += delegate(object s, EventArgs e) { SyncFromServer(); };
@@ -285,6 +338,10 @@ namespace DshLauncher
         }
 
         /// <summary>更新按钮与版本标注随检查结果变化。</summary>
+        /// <remarks>
+        /// 检查更新跑在后台线程上，所以这里先做 InvokeRequired 分流；窗口正在销毁时直接返回
+        /// （<c>BeginInvoke</c> 到已销毁的句柄会抛，用 catch 兜住即可）。
+        /// </remarks>
         public void RefreshUpdateBadge()
         {
             if (IsDisposed) return;
@@ -305,6 +362,10 @@ namespace DshLauncher
         }
 
         /// <summary>进入部署模式：状态面板让位给部署清单。</summary>
+        /// <remarks>
+        /// 两个面板共用同一格，靠 Visible 互换（不是叠着放）。调用点可能在后台线程
+        /// （环境体检完成时），所以先分流到 UI 线程再动控件。
+        /// </remarks>
         public void EnterDeployMode()
         {
             if (IsDisposed) return;
@@ -322,6 +383,7 @@ namespace DshLauncher
         }
 
         /// <summary>部署完成：恢复普通界面。</summary>
+        /// <remarks>主按钮文字要显式复位 —— 部署模式下它被改成了「启动 DSH」/「一键部署」。</remarks>
         public void ExitDeployMode()
         {
             if (IsDisposed) return;
@@ -340,6 +402,13 @@ namespace DshLauncher
         }
 
         /// <summary>部署进度刷新（部署器每次变更都会调）。</summary>
+        /// <remarks>
+        /// 只认"部署模式"下的状态：普通模式的面板与按钮由 <c>SyncFromServer</c> 接管，
+        /// 本方法在这里直接 return，免得两套逻辑互相覆盖。
+        /// 头部文案是一串链式判定：运行中 → 已完成 → 已结束但没成功 → 体检说仍需部署 → 环境就绪，
+        /// 取第一个成立的分支。顺序不能调：<c>done</c> 要求"已结束**且**成功"，
+        /// 必须排在"只看已结束"那一条之前，否则失败会显示成成功之后的那一档。
+        /// </remarks>
         public void SyncDeploy()
         {
             if (IsDisposed) return;
@@ -375,9 +444,19 @@ namespace DshLauncher
             _btnStart.Text = running ? "部署中…" : (done ? "启动 DSH" : "一键部署");
             _btnOpen.Enabled = !running && !_deployMode;
             _btnStop.Enabled = false;
+            // 授权环按"忙"来驱动：Starting 档会切到 33ms 刷新并旋转；Stopped 档则停表省 CPU
             _ring.SetStatus(running ? ServerStatus.Starting : ServerStatus.Stopped);
         }
 
+        /// <summary>
+        /// 把服务状态翻译成界面：状态面板的文案/信号色、授权环的档位、各按钮的可用性。
+        /// </summary>
+        /// <remarks>
+        /// 三个来源会调它 —— 服务的 StatusChanged 事件、启动期的日志事件、以及部署结束后的复位，
+        /// 因此**可能来自任意线程**（先走 InvokeRequired 分流）。
+        /// 状态到文案的映射集中在下面那个 switch 里：新增状态时务必在 default 之外补一条，
+        /// default 是"未运行"，漏了会让异常状态显示成待机。
+        /// </remarks>
         private void SyncFromServer()
         {
             if (IsDisposed) return;
@@ -447,8 +526,17 @@ namespace DshLauncher
             if (_btnHelp != null) _btnHelp.Enabled = !busy;
         }
 
+        /// <summary>放行关闭：置位后 <c>OnFormClosing</c> 不再拦截，直接走正常关闭流程。</summary>
+        /// <remarks>托盘菜单的"退出"必须先调它，否则这次关闭会被当成"用户点了右上角"而隐藏到托盘。</remarks>
         public void AllowClose() { _allowClose = true; }
 
+        /// <summary>关闭前的分流：托盘化还是真退出。</summary>
+        /// <remarks>
+        /// 两条路都会先 <c>Cancel = true</c>：隐藏交给 <c>Hide()</c>，退出交给
+        /// <c>LauncherContext.ExitApp()</c>（它会自己再走一次 AllowClose + Close 把这次关闭放行）。
+        /// 只有"用户点关闭"（UserClosing）才拦，系统发起的关闭（关机、任务管理器）照常放行。
+        /// </remarks>
+        /// <param name="e">关闭参数；本方法会改写它的 <c>Cancel</c>。</param>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (!_allowClose && e.CloseReason == CloseReason.UserClosing)
@@ -468,6 +556,17 @@ namespace DshLauncher
         }
 
         // ---- 自绘：档案终端版式 ----
+        /// <summary>
+        /// 画整套版式：顶边高光带、标题栏刻度、品牌锁排、章节线、页脚。
+        /// </summary>
+        /// <remarks>
+        /// 每次触发都会把整套版式从头画一遍，不做"只画变化部分"的分支 —— 运行期只有三条窄带
+        /// 会被 <see cref="Anim"/> 打脏区，真正重绘的面积本来就很小，而窗体开了双缓冲，不会闪。
+        /// 两条 GDI+ 约定：① 图片一律取自 <c>Res.Logo()</c> / <c>Res.Mark()</c> 的**共享缓存实例**，
+        /// 只能画、不能在这里释放；② 高光的渐隐是把光带切成 10 段、逐段调 alpha 画出来的，
+        /// 不是 LinearGradientBrush —— 段数调小会看出台阶。
+        /// </remarks>
+        /// <param name="e">绘制参数，本方法只用其中的 Graphics。</param>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -483,6 +582,7 @@ namespace DshLauncher
             Theme.Fill(g, new Rectangle(0, 0, w, band), Theme.Green);
             int hlW = Math.Max(Theme.S(90), (int)(w * 0.14));
             int hlX = (int)(Anim.Cycle(4.6, 0.0) * (w + hlW * 2)) - hlW;
+            // 渐隐靠分段：alpha 按 (i/9)² 递增 —— 尾部几乎透明、头部最亮，10 段正好看不出台阶
             for (int i = 0; i < 10; i++)
             {
                 int a0 = hlX - hlW + hlW * i / 10;

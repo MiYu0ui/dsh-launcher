@@ -12,15 +12,32 @@ namespace DshLauncher
 {
     /// <summary>
     /// 自检：真实启动一次服务，验证"全程没有任何黑色命令行窗口"。
-    /// 只在临时目录 + 非 3080 端口上运行，不会影响正在使用中的服务。
+    /// 只在临时工作目录 + 自选端口上运行（默认不碰配置里的 3080），不会影响正在使用中的服务。
     /// </summary>
+    /// <remarks>
+    /// 报告有两个去处：stdout（先挂上父进程的控制台才看得见）与 --selftest 指定路径的报告文件；
+    /// 两者都会先过一遍 SecretMask，因为这份报告经常被直接贴出来。
+    /// 退出码就是唯一判据：0 = PASS，1 = FAIL —— build.ps1 与 CI 都看它。
+    /// </remarks>
     internal static class SelfTest
     {
+        /// <summary>
+        /// 把本进程挂到父进程的控制台上。本程序是 GUI 子系统，自身没有控制台，
+        /// 不挂的话 Console.WriteLine 出来的报告在命令行里根本看不见。
+        /// 挂不上（例如父进程也没有控制台）就忽略，报告文件仍然是可靠出路。
+        /// </summary>
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
 
+        // AttachConsole 的约定值：-1 表示"父进程的控制台"
         private const int AttachParentProcess = -1;
 
+        /// <summary>
+        /// 跑一次自检：拉起真实服务 → 等端口就绪 → 前后对比可见控制台窗口 → 干净停掉 → 汇总成报告。
+        /// 全程只使用临时工作目录与自选端口，不碰用户正在用的那份服务。
+        /// </summary>
+        /// <param name="a">命令行参数：--port / --mode / --verify 会覆盖默认值，--selftest 后的路径决定报告写到哪。</param>
+        /// <returns>进程退出码：0 = PASS，1 = FAIL。</returns>
         public static int Run(Args a)
         {
             try { AttachConsole(AttachParentProcess); } catch { }
@@ -33,15 +50,19 @@ namespace DshLauncher
             try
             {
                 Directory.CreateDirectory(workspace);
+                // 端口优先用 --port 指定的，否则现找一个空闲端口 —— 这样不会撞上本机正在运行的服务。
                 int port = a.Port > 0 ? a.Port : FreePort();
 
                 AppConfig cfg = new AppConfig();
                 cfg.Workspace = workspace;
                 cfg.Port = port;
                 cfg.AutoOpenBrowser = false;
+                // 只有显式 --verify 才开核验：自检要回答的是"服务能不能起来、有没有黑窗"，
+                // 不该因为一次网络抖动把整个自检判成 FAIL。
                 cfg.VerifyIntegrity = a.Verify;
                 if (a.Mode == "npx") cfg.LaunchMode = "npx";
                 else if (a.Mode == "direct") cfg.LaunchMode = "direct";
+                // 没给 --mode 时按"本地有没有缓存入口"自动选，和主程序的默认策略保持一致。
                 else cfg.LaunchMode = DshLocator.FindCachedEntry(cfg) != null ? "direct" : "npx";
 
                 lines.Add("DSH 启动器自检报告");
@@ -59,6 +80,8 @@ namespace DshLauncher
 
                 server = new DshServer();
                 StringBuilder serviceLog = new StringBuilder();
+                // 服务的输出只保留最近一段：攒到 8000 字符就从**头部**丢 4000 字符，
+                // 长时间跑也不会把内存吃掉；报告里只截尾部若干行。
                 server.Log += delegate(string message, LogLevel level)
                 {
                     lock (serviceLog)
@@ -71,6 +94,8 @@ namespace DshLauncher
                 lines.Add("");
                 lines.Add("[2] 启动服务（隐藏窗口）…");
                 server.StartAsync(cfg);
+                // 最多等 5 分钟：首次 npx 安装可能要下载很久。
+                // 超时本身不算失败 —— 后面那次 HTTP 探测才是"服务到底起没起来"的判据。
                 bool terminal = WaitTerminal(server, 300000);
                 lines.Add("      最终状态：" + server.Status + "（等待 " + (terminal ? "结束" : "超时") + "）");
 
@@ -114,6 +139,7 @@ namespace DshLauncher
                         if (serviceLines[i].Trim().Length > 0) lines.Add(serviceLines[i].TrimEnd());
                 }
 
+                // 只有服务确实活着才验证"停止 + 端口释放"；已经失败或端口冲突时这一项没有意义。
                 if (server != null && (server.Status == ServerStatus.Running || server.Status == ServerStatus.External))
                 {
                     lines.Add("");
@@ -147,6 +173,8 @@ namespace DshLauncher
             {
                 try
                 {
+                    // 报告路径来自 --selftest 之后的第一个非 - 参数（build.ps1 传的是 build\selftest-report.txt）。
+                    // 刻意写带 BOM 的 UTF-8：记事本一类工具据此认出编码，中文不会变乱码。
                     File.WriteAllText(a.SelfTestResult, report, new UTF8Encoding(true));
                     Console.WriteLine("报告已写入：" + a.SelfTestResult);
                 }
@@ -155,6 +183,7 @@ namespace DshLauncher
             return pass ? 0 : 1;
         }
 
+        /// <summary>轮询到终态或超时；返回是否等到了终态（返回 false 只表示超时，不等于服务失败）。</summary>
         private static bool WaitTerminal(DshServer server, int timeoutMs)
         {
             DateTime deadline = DateTime.Now.AddMilliseconds(timeoutMs);
@@ -169,6 +198,11 @@ namespace DshLauncher
         }
 
         /// <summary>用 node 拉起一个 powershell（与 DSH 调用工具的方式一致），检查是否冒出窗口。</summary>
+        /// <remarks>
+        /// 脚本故意用 stdio: inherit 让 powershell 继承 node 的控制台 —— 换成管道就复现不出黑窗了。
+        /// node 找不到时直接返回 0（这一项不适用，不算失败）；等 700ms 让 powershell 真起来再数窗口，
+        /// 进程最多再等 8 秒，之后强杀。
+        /// </remarks>
         private static int GrandchildWindowTest(string workspace)
         {
             try
@@ -207,6 +241,10 @@ namespace DshLauncher
             catch { return 0; }
         }
 
+        /// <summary>
+        /// 让系统分配一个空闲端口：绑 0 号端口问内核要，拿到端口号后立刻释放。
+        /// 释放到别人占用之间有个理论上的竞争窗口，自检场景够用；连试 30 次仍拿不到就退回 3099。
+        /// </summary>
         private static int FreePort()
         {
             for (int attempt = 0; attempt < 30; attempt++)

@@ -6,10 +6,26 @@ using System.Windows.Forms;
 
 namespace DshLauncher
 {
+    /// <summary>
+    /// 进程入口与启动顺序：解析参数 → 自检分流 → 设定界面缩放 → 抢占单实例 → 跑主消息循环。
+    /// </summary>
+    /// <remarks>
+    /// 主循环里只有 <see cref="LauncherContext"/>；开启动画、主窗口、托盘都由它按时间轴驱动，
+    /// 不另起 <c>Application.Run</c>（原因见 Main 里的注释）。
+    /// </remarks>
     internal static class Program
     {
+        /// <summary>
+        /// 单实例互斥体。抢占成功才持有，退出前在 <c>finally</c> 里释放；
+        /// 抢不到时会被置回 null，所以不能假设它一定非空。
+        /// </summary>
         private static Mutex _instanceMutex;
 
+        /// <summary>这次启动要不要放开场动画。</summary>
+        /// <remarks>
+        /// 自动启动、只进托盘、自检、显式 <c>--no-boot</c> 都不放 —— 这几种场合用户要么不在看，要么不该被打扰。
+        /// 其余情况看配置项；配置读失败时按"放"处理，宁可多放一次动画也不要让界面显得没起来。
+        /// </remarks>
         private static bool ShouldPlayBoot(Args args)
         {
             if (args.AutoStart || args.Minimized || args.SelfTest || args.NoBoot) return false;
@@ -17,6 +33,15 @@ namespace DshLauncher
             catch { return true; }
         }
 
+        /// <summary>进程入口。</summary>
+        /// <param name="argv">原始命令行（已去掉 exe 名），交给 <see cref="Args.Parse"/> 解析。</param>
+        /// <returns>0 表示正常退出（含"已有实例在跑，本进程只负责把它的窗口叫出来"）；1 表示启动过程抛异常。</returns>
+        /// <remarks>
+        /// <c>--help</c> 与 <c>--selftest</c> 在创建任何界面之前就分流出去，包括不抢单实例锁 ——
+        /// 自检要能在服务正跑着的时候执行。
+        /// 单实例：默认只试一次，更新 / 迁移安装位置后的重启会重试 60 次（每 250ms 一次），
+        /// 等旧实例把锁交出来。抢不到且不是自动启动时，就敲一下"显示窗口"事件把已有实例叫到前台。
+        /// </remarks>
         [STAThread]
         private static int Main(string[] argv)
         {

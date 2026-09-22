@@ -3,9 +3,14 @@ using System.Collections.Generic;
 
 namespace DshLauncher
 {
-    /// <summary>详情页里的一个内容块。三级界面按块顺序排版。</summary>
+    /// <summary>详情页里的一个内容块。三级界面按块在主题里的先后顺序排版。</summary>
+    /// <remarks>
+    /// 用下面的静态工厂方法来造块，别手工 new：它们把"哪几档会用到 Title"这类约定固化了。
+    /// 各档实际怎么画见 HelpDetailForm.OnPaint；那里测量与绘制共用同一套规则。
+    /// </remarks>
     internal class HelpBlock
     {
+        /// <summary>块的呈现样式，决定三级界面的画法（HelpDetailForm 的 switch 按其分支）。</summary>
         public enum Kind
         {
             Para,     // 段落
@@ -17,44 +22,54 @@ namespace DshLauncher
             Sub       // 小节标题
         }
 
+        // 呈现样式；工厂方法会替你设好
         public Kind Type = Kind.Para;
+        // 标题：只有 Kv / Note / Warn / Sub 会画出来，Para / Steps / Cmd 会忽略它
         public string Title = "";
+        // 正文行：Para 只画第一行，Steps 一行一步（序号自动），Cmd 一行一条命令
         public List<string> Lines = new List<string>();
 
+        /// <summary>段落。注意渲染器只画第一行 —— 需要多行请拆成多个 Para 块。</summary>
         public static HelpBlock P(string text)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Para; b.Lines.Add(text); return b;
         }
 
+        /// <summary>小节标题（只用 title，Lines 会被忽略）。</summary>
         public static HelpBlock Sub(string title)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Sub; b.Title = title; return b;
         }
 
+        /// <summary>编号步骤：一行一步，序号 1..n 由渲染器自动画出来。</summary>
         public static HelpBlock Steps(params string[] steps)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Steps;
             b.Lines.AddRange(steps); return b;
         }
 
+        /// <summary>键值两列。pairs 里每条是 键=值，按**第一个**等号切分，所以键里不能再有等号。</summary>
         public static HelpBlock Kv(string title, params string[] pairs)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Kv; b.Title = title;
             b.Lines.AddRange(pairs); return b;
         }
 
+        /// <summary>提示块（灰）。title 传空字符串时不画标题行，也不画左侧色条。</summary>
         public static HelpBlock Note(string title, params string[] lines)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Note; b.Title = title;
             b.Lines.AddRange(lines); return b;
         }
 
+        /// <summary>警告块（红）。参数含义同 Note，只是配色与措辞更重。</summary>
         public static HelpBlock Warn(string title, params string[] lines)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Warn; b.Title = title;
             b.Lines.AddRange(lines); return b;
         }
 
+        /// <summary>命令行块：等宽字体加底衬，一行一条命令。</summary>
         public static HelpBlock Cmd(params string[] lines)
         {
             HelpBlock b = new HelpBlock(); b.Type = Kind.Cmd;
@@ -63,30 +78,39 @@ namespace DshLauncher
     }
 
     /// <summary>一个帮助主题：二级界面列它，三级界面展开它。</summary>
+    /// <remarks>
+    /// Index 必须**全局唯一**（二级界面按它画编号条）；Group 决定分组；
+    /// Summary 与 KeyPoints 只喂给二级界面的概览，Blocks 才是三级界面的正文。
+    /// </remarks>
     internal class HelpTopic
     {
-        public string Index = "";     // "SECT. 01"
-        public string Title = "";     // 中文标题
-        public string En = "";        // 英文小字
-        public string Group = "";     // 左列表的分组
-        public string Summary = "";   // 一句话摘要
-        public List<string> KeyPoints = new List<string>();     // 概览里的要点
-        public List<HelpBlock> Blocks = new List<HelpBlock>();  // 三级界面的正文
+        public string Index = "";     // 编号条文字，如 "SECT. 01"；必须唯一
+        public string Title = "";     // 中文标题（二级、三级界面都用它）
+        public string En = "";        // 英文小字，画在中文标题右侧
+        public string Group = "";     // 左列表的分组；分组顺序按首次出现排（见 Groups()）
+        public string Summary = "";   // 一句话摘要，只出现在二级界面的概览里
+        public List<string> KeyPoints = new List<string>();     // 概览里的要点，逐条列出
+        public List<HelpBlock> Blocks = new List<HelpBlock>();  // 三级界面的正文，按顺序排版
     }
 
     /// <summary>
-    /// 帮助内容。**纯数据**：加主题、加小节都不用碰界面代码。
+    /// 帮助内容，**纯数据**：加主题、加小节都不用碰界面代码。
+    /// 目标是覆盖启动器现有的全部功能，所以每个主题都写到"照着能做"的程度。
+    /// 内容分两个 partial 文件：本文件写 SECT. 01-07，HelpTopicsMore.cs 接着写 SECT. 08 起。
     /// 目标是覆盖启动器现有的全部功能，所以每个主题都写到"照着能做"的程度。
     /// </summary>
     internal static partial class HelpTopics
     {
+        // All 的惰性缓存：Build() 只跑一次，之后 All 每次返回同一个 List 实例（调用方只读，不要就地修改）。
         private static List<HelpTopic> _all;
 
+        /// <summary>全部帮助主题。首次访问时构建并缓存，二级界面直接用它。</summary>
         public static List<HelpTopic> All
         {
             get { if (_all == null) _all = Build(); return _all; }
         }
 
+        /// <summary>去重后的分组名，按**首次出现**的顺序返回 —— 二级界面的分组顺序就取自这里。</summary>
         public static List<string> Groups()
         {
             List<string> gs = new List<string>();
@@ -95,6 +119,15 @@ namespace DshLauncher
             return gs;
         }
 
+        /// <summary>主题工厂：各参数与 HelpTopic 的字段一一对应，省去逐字段赋值。</summary>
+        /// <param name="index">编号条文字，如 "SECT. 01"；必须全局唯一。</param>
+        /// <param name="group">左侧列表的分组名。</param>
+        /// <param name="title">中文标题。</param>
+        /// <param name="en">英文小字。</param>
+        /// <param name="summary">一句话摘要（概览页用）。</param>
+        /// <param name="keys">概览页的要点列表。</param>
+        /// <param name="blocks">三级界面的正文块，按传入顺序排版。</param>
+        /// <returns>可直接 Add 进列表的主题对象。</returns>
         internal static HelpTopic T(string index, string group, string title, string en, string summary,
                                     string[] keys, params HelpBlock[] blocks)
         {
@@ -105,10 +138,16 @@ namespace DshLauncher
             return t;
         }
 
+        /// <summary>
+        /// 构造 SECT. 01-07，末尾接上 HelpTopicsMore.BuildMore() 写出的第二部分。
+        /// 分组顺序由**首次出现**决定，而组内顺序就是主题在列表里的先后 ——
+        /// 想让某个主题排在某组的前面或后面，得把它插到对应位置，只改 Group 是不够的。
+        /// </summary>
         private static List<HelpTopic> Build()
         {
             List<HelpTopic> list = new List<HelpTopic>();
 
+            // SECT. 01 快速上手：四个主按钮、首次运行流程、托盘常驻，以及各按钮的可点条件。
             list.Add(T("SECT. 01", "入门", "快速上手", "QUICK START",
                 "四个按钮就能把 DSH 跑起来：一键部署 → 启动 DSH → 打开界面；不想用了点停止。",
                 new string[]
@@ -132,6 +171,7 @@ namespace DshLauncher
                     "停止=危险色，服务运行中才可点")
             ));
 
+            // SECT. 02 一键部署：7 步清单逐条解释、会不会动系统，以及强制重跑向导的演示开关。
             list.Add(T("SECT. 02", "入门", "一键部署的 7 个步骤", "AUTO DEPLOYMENT",
                 "从零到能跑：系统门 → Node → npm → 版本 → 下载 → 快捷方式 → 核验，每步都显示在清单上。",
                 new string[]
@@ -156,6 +196,7 @@ namespace DshLauncher
                     "\"DSH Launcher.exe\"")
             ));
 
+            // SECT. 03 启动方式：npx 与极速模式的差别、怎么选、核验在哪一档会被跳过。
             list.Add(T("SECT. 03", "入门", "启动方式：npx 与极速模式", "LAUNCH MODE",
                 "npx 方式每次经 npm 检查版本、可核验完整性；极速模式直接启动本地已缓存的 DSH，最快且离线可用。",
                 new string[]
@@ -172,6 +213,7 @@ namespace DshLauncher
                 HelpBlock.Note("完整性核验", "只有 npx 方式会走核验。勾了「启动前核验下载源完整性」但用极速模式时，核验会被跳过（清单上标 --）。")
             ));
 
+            // SECT. 04 版本策略：latest 的两级解析顺序与 pinned 的可复现性，并解释为什么不看 npm 的 dist-tag。
             list.Add(T("SECT. 04", "入门", "版本策略：latest 与 pinned", "VERSION POLICY",
                 "默认每次解析官方最新可安装版；也可以钉死一个版本号，做可复现的部署。",
                 new string[]
@@ -192,6 +234,7 @@ namespace DshLauncher
                     "pinnedintegrity=该版本的完整性摘要（可留空）")
             ));
 
+            // SECT. 05 安装位置：首次三选一、搬迁流程，以及运行期数据（日志/备份）为什么不放 exe 目录。
             list.Add(T("SECT. 05", "入门", "安装位置：装到哪、怎么搬", "INSTALL LOCATION",
                 "首次运行三选一；之后可以在设置里搬迁，搬迁会复制本体、重建快捷方式并重启自己。",
                 new string[]
@@ -214,6 +257,7 @@ namespace DshLauncher
                 HelpBlock.Note("运行期数据放哪？", "日志与备份固定放在 %LOCALAPPDATA%\\DSH Launcher\\{logs,backup}，不放在 exe 目录 —— 绿色包不会夹带日志，挪 exe 也不丢日志。")
             ));
 
+            // SECT. 06 界面与动效：三段主流程动画、二级界面过渡的三个档位、按钮动效的时长。
             list.Add(T("SECT. 06", "界面", "界面与动效", "MOTION & LOOK",
                 "开启动画、接入过渡、二级界面过渡（三档可调）、按钮动效 —— 都能在设置里关掉或调档。",
                 new string[]
@@ -241,6 +285,7 @@ namespace DshLauncher
                     "按下=边框内收 1px")
             ));
 
+            // SECT. 07 状态面板与授权环：各状态的含义，以及日志文件的落点。
             list.Add(T("SECT. 07", "界面", "状态面板与授权环", "STATUS PANEL",
                 "中间那块面板告诉你服务此刻处在哪个阶段；右侧暗屏里是授权环加载动画。",
                 new string[]
@@ -258,6 +303,7 @@ namespace DshLauncher
                 HelpBlock.Note("日志去哪了", "界面上不显示滚动日志（那是旧版黑窗的体验）。完整日志写在 %LOCALAPPDATA%\\DSH Launcher\\logs\\launcher-YYYYMMDD.log。")
             ));
 
+            // 第二部分（SECT. 08 起）写在 HelpTopicsMore.cs，同一个 partial 类的另一个文件里
             list.AddRange(BuildMore());
             return list;
         }

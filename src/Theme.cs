@@ -13,6 +13,7 @@ namespace DshLauncher
     /// </summary>
     internal static class Theme
     {
+        /// <summary>DPI 缩放系数；由 <see cref="InitScale"/> 在启动时定一次，之后只读。</summary>
         private static float _scale = 1f;
 
         public static float Scale { get { return _scale; } }
@@ -23,10 +24,15 @@ namespace DshLauncher
         public static float SF(float designPx) { return designPx * _scale; }
 
         // ---- 亮面（主界面） ----
+        // 这是一组层次色：Bg 打底、Panel 画标题区、PanelHi 作抬起面（按钮 / 输入框）、BgShade 作下沉面
+        /// <summary>主界面统一背景（暖灰白）。</summary>
         public static readonly Color Bg = Color.FromArgb(0xEA, 0xE5, 0xE1);      // 统一背景
 
+        /// <summary>比 <see cref="Bg"/> 略深一档的下沉面：禁用态按钮底色。</summary>
         public static readonly Color BgShade = Color.FromArgb(0xDF, 0xD9, 0xD3);
+        /// <summary>顶部标题区 / 标签块底衬的面板色。</summary>
         public static readonly Color Panel = Color.FromArgb(0xF5, 0xF2, 0xEF);
+        /// <summary>比 <see cref="Panel"/> 更亮的抬起面：按钮、输入框。</summary>
         public static readonly Color PanelHi = Color.FromArgb(0xFC, 0xFA, 0xF8);
         public static readonly Color Ink = Color.FromArgb(0x08, 0x0A, 0x08);     // 近黑正文
         public static readonly Color InkSoft = Color.FromArgb(0x3C, 0x3A, 0x35);
@@ -43,10 +49,14 @@ namespace DshLauncher
 
 
         // ---- 暗面（环形加载器所在的"屏幕"） ----
+        /// <summary>暗面底色（近黑青）。</summary>
         public static readonly Color Dark = Color.FromArgb(0x11, 0x18, 0x1B);
 
+        /// <summary>暗面细线。</summary>
         public static readonly Color DarkLine = Color.FromArgb(0x53, 0x61, 0x66);
+        /// <summary>暗面正文。</summary>
         public static readonly Color DarkText = Color.FromArgb(0xE0, 0xE3, 0xDC);
+        /// <summary>暗面次要文字。</summary>
         public static readonly Color DarkSub = Color.FromArgb(0xA6, 0xB0, 0xB1);
 
         // ---- 状态信号 ----
@@ -60,6 +70,10 @@ namespace DshLauncher
         private static string _tech;
         private static string _mono;
 
+        /// <summary>
+        /// 按候选顺序挑第一个系统里真的装了的字族，都没有就用 <paramref name="fallback"/>。
+        /// 判据很直接：试着 new 一个 <c>FontFamily</c>，装不上会抛异常。
+        /// </summary>
         private static string PickFamily(string[] candidates, string fallback)
         {
             foreach (string name in candidates)
@@ -71,6 +85,7 @@ namespace DshLauncher
         }
 
         // 站点的后备字体链正是 PingFang SC / Microsoft YaHei / system-ui
+        /// <summary>中文字族（懒解析：首次用到才探测，结果缓存下来）。</summary>
         private static string Cjk
         {
             get
@@ -83,6 +98,7 @@ namespace DshLauncher
         }
 
         /// <summary>科技感拉丁字形：站点的 Novecento Sans Wide 是几何宽体，这里用 DIN 系的 Bahnschrift 近似。</summary>
+        /// <remarks>同样懒解析一次并缓存；候选都没装时退化到系统无衬线。</remarks>
         private static string Tech
         {
             get
@@ -94,6 +110,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>等宽字族（懒解析一次并缓存）：端口、路径、版本号这类要对齐的字都用它。</summary>
         private static string Mono
         {
             get
@@ -106,6 +123,7 @@ namespace DshLauncher
         }
 
         // 字号用 pt 会随 DPI 自动放大；只有像素几何需要乘 Scale
+        // 字体对象首次取用时创建、之后常驻：Font 背后是 GDI 句柄，按帧新建会一路泄漏
         private static Font _cachedFontUi;
         public static Font FontUi { get { if (_cachedFontUi == null) _cachedFontUi = new Font(Cjk, 9.75f, FontStyle.Regular, GraphicsUnit.Point); return _cachedFontUi; } }
         private static Font _cachedFontUiBold;
@@ -145,13 +163,6 @@ namespace DshLauncher
         // ---- 动效缓动（全部动画共用同一套曲线，衔接才一致）----
         public static double Clamp01(double p) { return p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p); }
 
-        /// <summary>进度区间映射：在 [start, end] 秒之间取 0→1。</summary>
-        public static double Phase(double now, double start, double end)
-        {
-            if (end <= start) return now >= end ? 1.0 : 0.0;
-            return Clamp01((now - start) / (end - start));
-        }
-
         public static double EaseOutCubic(double p) { return 1.0 - Math.Pow(1.0 - Clamp01(p), 3.0); }
         public static double EaseInCubic(double p) { double q = Clamp01(p); return q * q * q; }
 
@@ -188,6 +199,10 @@ namespace DshLauncher
             return new Rectangle(Lerp(a.X, b.X, p), Lerp(a.Y, b.Y, p), Lerp(a.Width, b.Width, p), Lerp(a.Height, b.Height, p));
         }
 
+        /// <summary>
+        /// 矩形描边。注意它走的是**直接绘制**而不是填充，所以按惯例把宽高各减 1，
+        /// 让右 / 下边落在矩形之内、线宽不越界。
+        /// </summary>
         public static void StrokeRect(Graphics g, Rectangle r, Color c, float width)        {
             using (Pen p = new Pen(c, width)) g.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
         }
@@ -213,6 +228,7 @@ namespace DshLauncher
         /// 动画卡片的统一外框：绿色顶边 + 双层细线框 + 四角刻度。
         /// 开启动画与接入过渡动画共用，保证两段动画是同一套语言。
         /// </summary>
+        /// <remarks>开启动画与接入过渡（<see cref="LinkTransition"/>）共用这一份，改这里两处一起变。</remarks>
         public static void CardFrame(Graphics g, int w, int h)
         {
             Fill(g, new Rectangle(0, 0, w, h), Bg);
@@ -223,6 +239,10 @@ namespace DshLauncher
             CornerTicks(g, Rectangle.Inflate(inner, -S(5), -S(5)), Line, S(12));
         }
 
+        /// <summary>
+        /// 量宽字距文本：逐字符测量、每个字符加一份 <paramref name="tracking"/>，末尾那份减掉。
+        /// 必须与 DrawTracked 成对使用 —— 量得不准就会画出框外。
+        /// </summary>
         public static Size MeasureTracked(Graphics g, string text, Font font, float tracking)
         {
             int w = 0, h = 0;
@@ -285,6 +305,7 @@ namespace DshLauncher
 
         // ---- 动态边框（缺口沿轮廓移动，取自站点标志轮廓的动法）----
 
+        /// <summary>宽字距文本的右对齐版本：先量宽，再把起点左移到 <paramref name="right"/> 之前。</summary>
         public static void DrawTrackedRight(Graphics g, string text, Font font, int right, int y, Color color, float tracking)
         {
             Size s = MeasureTracked(g, text, font, tracking);
@@ -292,6 +313,7 @@ namespace DshLauncher
         }
 
         /// <summary>返回矩形轮廓上距起点 d 像素处的点（顺时针：上→右→下→左）。</summary>
+        /// <remarks>d 先对周长取模，所以负数与超出周长都能安全绕回来；周长为 0 时退化为左上角。</remarks>
         public static PointF PerimeterPoint(Rectangle r, double d)
         {
             double w = r.Width, h = r.Height;
@@ -308,7 +330,7 @@ namespace DshLauncher
             return new PointF(r.Left, r.Bottom - (float)d);
         }
 
-        /// <summary>脉冲值：在 [min,max] 之间按周期正弦往返。</summary>
+        /// <summary>脉冲值：在 [min,max] 之间按周期正弦往返（<paramref name="offset"/> 用来错开相位）。</summary>
         public static double Pulse(double period, double offset, double min, double max)
         {
             double p = Anim.Cycle(period, offset);
@@ -332,7 +354,7 @@ namespace DshLauncher
 
             // 彗尾：沿周长行进的一小段高光，尾部渐隐
             double perim = 2.0 * (r.Width + r.Height);
-            if (perim < S(60)) return;
+            if (perim < S(60)) return;   // 框太小：彗尾会糊成一坨，干脆不画
             double head = Anim.Cycle(period, phase) * perim;
             double len = Math.Max(S(46), perim * 0.13);
             int steps = 14;

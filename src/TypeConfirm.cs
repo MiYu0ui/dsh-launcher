@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -26,10 +26,23 @@ namespace DshLauncher
 
         private TextBox _input;
         private FlatButton _ok;
+        /// <summary>
+        /// 复核定时器：每 250ms 主动调一次 <see cref="SyncOk"/>。
+        /// 为什么需要它见构造函数 —— 输入法合成串未提交时 TextChanged 不会按预期触发。
+        /// </summary>
+        private readonly System.Windows.Forms.Timer _poll;
+        /// <summary>正文块高度（**设计像素**，已除掉缩放）。绘制时仍要过 <see cref="Theme.S"/>。</summary>
         private int _messageH;
+        /// <summary>警告块高度（**设计像素**，同 <see cref="_messageH"/>）。</summary>
         private int _warningH;
+        /// <summary>字段块首行 y（**物理像素**，绘制时直接用，不要再乘缩放）。</summary>
         private int _fieldsTop;
+        /// <summary>输入框上沿 y（**物理像素**，同上）。</summary>
         private int _inputY;
+        /// <summary>
+        /// 是否「打对确认词并点了确认」；只有真的打对才置 true —— ✕ / Esc / 直接关掉一律落到 false，
+        /// 这就是 <see cref="Ask"/> 的返回值契约。
+        /// </summary>
         private bool _confirmed;
 
         private TypeConfirm(string track, string headline, string message, string[] fields,
@@ -59,10 +72,19 @@ namespace DshLauncher
             Layout(okText);
             Anim.Track(this, 1);
             _reveal = new WindowReveal(this, WindowReveal.Level, true);
+
+            // 轮询兜底：某些输入法状态下（合成串尚未提交）控件的 TextChanged 不会按预期触发，
+            // 界面显示着确认词、Text 却还是旧的 → 按钮永远不亮。每 250ms 主动复核一次。
+            _poll = new System.Windows.Forms.Timer();
+            _poll.Interval = 250;
+            _poll.Tick += delegate(object s, EventArgs e) { SyncOk(); };
+            _poll.Start();
         }
 
+        /// <summary>入场 / 退场动画驱动（对话框档：300ms 入、200ms 出；不做章节版式）。</summary>
         private readonly WindowReveal _reveal;
 
+        /// <summary>起播入场动画，并把焦点交给输入框（理由见方法体内的说明）。</summary>
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -71,12 +93,20 @@ namespace DshLauncher
             try { _input.Focus(); } catch { }
         }
 
+        /// <summary>
+        /// 关闭先交给 <see cref="WindowReveal.InterceptClose"/>：由它播完退场再真关（只拦第一次）。
+        /// 这一步不能省 —— 它同时负责把「取消关闭会重置 DialogResult」的坑补上。
+        /// </summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_reveal != null && _reveal.InterceptClose(e)) return;
             base.OnFormClosing(e);
         }
 
+        /// <summary>
+        /// 给无边框窗口补一点系统投影（<c>CS_DROPSHADOW</c>），让它从主界面上浮起来。
+        /// 这个样式位必须在窗口类注册时就带上，而 Form 没有对应属性，只能走 <c>CreateParams</c>。
+        /// </summary>
         protected override CreateParams CreateParams
         {
             get
@@ -87,6 +117,7 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>退订全局动效表并释放动画驱动器。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -109,6 +140,13 @@ namespace DshLauncher
         }
 
         // ---------------- 布局 ----------------
+        /// <summary>
+        /// 建控件并按设计像素摆位。
+        ///
+        /// ⚠️ 这里是**两套单位混用**的地方：窗体尺寸与控件位置最终要的是物理像素，所以每个推进步都过
+        /// <see cref="Theme.S"/>；而正文 / 警告的高度是量出来后除以缩放的**设计像素**（见 <see cref="_messageH"/>），
+        /// 推进时得再乘回去。这两处早先弄反过，症状就是下面注释里写的「压住下一行 / 输入框掉出客户区」。
+        /// </summary>
         private void Layout(string okText)
         {
             int contentW = Theme.S(DesignW) - Theme.S(Pad * 2);
@@ -126,10 +164,10 @@ namespace DshLauncher
             int y = Theme.S(HeaderH) + Theme.S(16);
             y += Theme.S(26);                                  // 标题
             y += Theme.S(10);                                  // 分隔线
-            if (_messageH > 0) y += _messageH + Theme.S(18);
+            if (_messageH > 0) y += Theme.S(_messageH) + Theme.S(18);   // _messageH 是设计像素，推进要过 Theme.S（绘制那边也是）
             _fieldsTop = y;
             if (_fields != null) y += _fields.Length * Theme.S(24) + Theme.S(6);
-            if (_warningH > 0) y += _warningH + Theme.S(14);
+            if (_warningH > 0) y += Theme.S(_warningH) + Theme.S(14);   // 同上：原来按设计值推进、按物理值绘制 → 警告会压住下一行
 
             y += Theme.S(10);                                  // 「请输入」提示行
             y += Theme.S(20);
@@ -146,7 +184,9 @@ namespace DshLauncher
             int rx = Theme.S(DesignW) - Theme.S(Pad);
 
             _input = new TextBox();
-            _input.Location = new Point(Theme.S(Pad), Theme.S(_inputY));
+            // ⚠️ _inputY 已经是**物理像素**（上面每步累加都过了 Theme.S），这里绝不能再包一层：
+            //    包了就是 1.5 倍缩放 → 输入框掉到客户区外面 → 确认词根本没法输入、按钮永远灰。
+            _input.Location = new Point(Theme.S(Pad), _inputY);
             _input.Size = new Size(Theme.S(DesignW - Pad * 2), Theme.S(28));
             _input.BorderStyle = BorderStyle.FixedSingle;
             _input.BackColor = Theme.PanelHi;
@@ -198,20 +238,51 @@ namespace DshLauncher
             close.BringToFront();
         }
 
+        /// <summary>当前输入是否等于确认词（先过 <see cref="Visible"/> 剥掉不可见字符，再忽略大小写比较）。</summary>
         private bool Matches()
         {
             if (_input == null) return false;
-            return string.Equals(_input.Text.Trim(), _want, StringComparison.OrdinalIgnoreCase);
+            return string.Equals(Visible(_input.Text), Visible(_want), StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// 只留"看得见的字符"再比较。
+        ///
+        /// ⚠️ 为什么不能只用 Trim()：`Trim()` 去得掉普通空白，但去不掉**零宽空格 U+200B**、
+        /// 零宽连字 U+200C/200D、以及 BOM U+FEFF 这类不可见字符 —— 它们经输入法或剪贴板
+        /// 混进来时，用户看到的字符串和确认词**一模一样**，比较结果却是 false，
+        /// 于是按钮永远点不亮（实测被这个卡住过）。这里把空白、控制符与零宽字符一律剥掉，
+        /// 用户看到什么就是什么。
+        /// </summary>
+        private static string Visible(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";   // 输入框刚建出来时 Text 可能就是 null
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(s.Length);
+            foreach (char ch in s)
+            {
+                if (char.IsWhiteSpace(ch) || char.IsControl(ch)) continue;
+                if (ch == '\u200B' || ch == '\u200C' || ch == '\u200D' || ch == '\uFEFF') continue;
+                sb.Append(ch);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>把按钮的可用态与 <see cref="FlatButton.Armed"/>（已武装 = 打对了）刷成当前输入对应的样子。</summary>
         private void SyncOk()
         {
             if (_ok == null) return;
             bool ok = Matches();
             if (_ok.Enabled != ok) _ok.Enabled = ok;
+            _ok.Armed = ok;          // 打对 → 按钮变实心红（一眼可见"现在能点了"）
+            _ok.Invalidate();
+            _ok.Update();            // 立刻重绘：否则打完最后一个字符的那一帧看上去还是灰的
             Invalidate();
         }
 
+        /// <summary>
+        /// 快捷键：Esc = 取消，Enter = 仅「已打对」时放行（没打对时回车被吃掉、不关窗）。
+        /// 入场期间顺手把动画跳完，但**不吞按键** —— 这个框全靠打字，吞掉第一个字符不可接受。
+        /// </summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             // 入场动画期间**不吞按键**：这个框全靠打字，吞掉第一个字符是不可接受的。
@@ -238,6 +309,7 @@ namespace DshLauncher
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>顶部标题区（<see cref="HeaderH"/> 以内）按住左键即可拖动这张无边框卡片。</summary>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -245,6 +317,10 @@ namespace DshLauncher
         }
 
         // ---------------- 绘制 ----------------
+        /// <summary>
+        /// 全自绘：绿顶边 + 面板标题区 + 巡行细线框，再叠正文 / 字段 / 警告 / 提示 / 诊断。
+        /// 标题走颜色插值淡入而非裁剪，原因见 Theme.DrawTracked 的说明（GDI 文字不认 GDI+ 裁剪区）。
+        /// </summary>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -317,7 +393,7 @@ namespace DshLauncher
             }
 
             // 「请输入 <确认词>」提示行
-            int hintY = Theme.S(_inputY) - Theme.S(22);
+            int hintY = _inputY - Theme.S(22);   // 同上：_inputY 已是物理像素
             Theme.DrawTracked(g, "请输入", Theme.FontMonoSmall, Theme.S(Pad), hintY + Theme.S(4),
                               Theme.Sub, Theme.SF(1.2f));
             TextRenderer.DrawText(g, _want, Theme.FontMono,
@@ -325,7 +401,19 @@ namespace DshLauncher
                 Matches() ? Theme.Green : Theme.Amber,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
-            // 四角括号：框住整张卡片（danger 态用告警色）
+            // 把"程序实际看到了什么"显示出来：下次出问题时截图就能一眼定位
+            // （例如显示"已输入 0 字符"说明输入法还没把合成串提交给控件）
+            if (_input != null && !Matches())
+            {
+                string diag = Visible(_input.Text).Length == 0
+                    ? "（还没收到输入：若框里已有字，说明输入法未提交，请按一下空格或回车）"
+                    : "（已收到 " + Visible(_input.Text).Length + " 字符，需要 " + Visible(_want).Length + " 个，内容不符）";
+                Theme.DrawTrackedRight(g, diag, Theme.FontMonoSmall, right, hintY + Theme.S(4),
+                                       Theme.SignalAlert, Theme.SF(1.0f));
+            }
+
+            // 四角括号：框住整张卡片（danger 态用告警色）。
+            // 四支各有自己的进度（左上→右上→左下→右下，错峰 30ms），由 WindowReveal 按时间轴给。
             if (_reveal != null && _reveal.WantsLayout)
                 UiPaint.Brackets(g, Rectangle.Inflate(ClientRectangle, -Theme.S(2), -Theme.S(2)),
                                  Theme.SignalAlert, _reveal.BracketPhases());

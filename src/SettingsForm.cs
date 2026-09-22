@@ -10,14 +10,20 @@ namespace DshLauncher
     /// <summary>设置窗口：与主界面同一套档案终端风格。</summary>
     internal class SettingsForm : Form
     {
+        // 设计尺寸：DesignW/DesignH 是 100% 缩放下的设计像素，实际布局一律经 Theme.S 换算。
+        // 本窗与卸载窗共用同一套版式元素，改这里的宽度要同步检查两个窗口的对齐。
         private const int DesignW = 664;
         private const int DesignH = 912;   // 810 + 102：新增「二级界面过渡动画」三档一行 + 说明行
         private const int PadX = 34;
+        // 标题区高度，同时是可拖动区域的下界（见 OnMouseDown）
         private const int HeaderH = 76;
 
+        // 直接引用调用方传进来的配置对象：Save() 是就地改它，调用方随后自己写盘
         private readonly AppConfig _cfg;
+        // 用于判断"端口改了但服务正在跑"；可为 null（此时不做该提示）
         private readonly DshServer _server;
 
+        // 工作目录输入框；Save 时会 Trim 并去掉首尾引号（用户常从资源管理器复制带引号的路径）
         private TextBox _dir;
         private NumericUpDown _port;
         private RadioButton _modeNpx;
@@ -37,6 +43,7 @@ namespace DshLauncher
         private RadioButton _motionOff;
         private Label _motionHint;
         private Label _shortcutHint;
+        // 安装位置只读展示：绿色免安装时显示"（绿色免安装）+ 当前目录"，否则显示配置里的安装目录
         private Label _installDirLabel;
 
         /// <summary>
@@ -46,6 +53,9 @@ namespace DshLauncher
         /// </summary>
         public string PendingInstallDir = null;
 
+        /// <summary>建设置窗：先搭界面再回填当前配置。</summary>
+        /// <param name="cfg">要编辑的配置对象（就地修改，不在本窗写盘）。</param>
+        /// <param name="server">DSH 服务句柄，仅用于判断端口改动是否需要提示；可为 null。</param>
         public SettingsForm(AppConfig cfg, DshServer server)
         {
             _cfg = cfg;
@@ -56,6 +66,8 @@ namespace DshLauncher
             LoadValues();
         }
 
+        // 入场动画/版式控制器。声明放在构造函数之后，但**必须在 BuildUi 之前完成赋值** ——
+        // BuildUi 里的 AddSection 要把章节锚点登记进它，晚一步章节就会整批丢失。
         private readonly WindowReveal _reveal;
 
         /// <summary>登记一个章节锚点：标题由 OnPaint 按导轨进度自绘，不再用子控件 Label。</summary>
@@ -64,24 +76,32 @@ namespace DshLauncher
             if (_reveal != null) _reveal.AddSection(y, index, cn, en);
         }
 
+        /// <summary>首次显示时开始播入场动画。</summary>
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             if (_reveal != null) _reveal.BeginEnter();
         }
 
+        /// <summary>关窗前先播退场动画（InterceptClose 会先取消本次关闭）。</summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_reveal != null && _reveal.InterceptClose(e)) return;   // 先播 200ms 退场再真关
             base.OnFormClosing(e);
         }
 
+        /// <summary>释放版式控制器。WindowReveal 持有本窗体引用，不释放会留下悬挂的动画注册。</summary>
         protected override void Dispose(bool disposing)
         {
             if (disposing && _reveal != null) _reveal.Dispose();
             base.Dispose(disposing);
         }
 
+        /// <summary>搭出整窗控件树：工作目录 → 端口 → 启动方式 → 动效档位 → 安装位置 → 底部按钮。</summary>
+        /// <remarks>
+        /// 章节标题不在这里建：它们由 AddSection 登记锚点、OnPaint 按导轨进度自绘，
+        /// 所以 y 只是"版式进度"，每加一节都要继续往下推。
+        /// </remarks>
         private void BuildUi()
         {
             SuspendLayout();
@@ -309,6 +329,7 @@ namespace DshLauncher
         }
 
         /// <summary>无边框窗口补一个系统投影。</summary>
+        /// <summary>无边框窗口补一个系统投影。</summary>
         protected override CreateParams CreateParams
         {
             get
@@ -319,6 +340,8 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>无边框窗口的拖动与"点击跳过入场"。</summary>
+        /// <remarks>只有左键落在标题区（HeaderH 以内）才拖动，免得在输入控件上误拖整窗。</remarks>
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -326,6 +349,7 @@ namespace DshLauncher
             if (e.Button == MouseButtons.Left && e.Y <= Theme.S(HeaderH)) WindowChrome.BeginDrag(this);
         }
 
+        /// <summary>键盘拦截：入场期间按任意键跳过动画；Esc 等同取消并关窗。</summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (_reveal != null && _reveal.Busy) { _reveal.Skip(); return true; }
@@ -338,6 +362,7 @@ namespace DshLauncher
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>加一个 AutoSize 的粗体标签（用于「固定版本」「首选源」这类行内小标题）。</summary>
         private void AddLabel(string text, int x, int y)
         {
             Label l = new Label();
@@ -351,6 +376,7 @@ namespace DshLauncher
             Controls.Add(l);
         }
 
+        /// <summary>加一个 AutoSize 的灰色说明标签（跟在章节标题右侧，解释该节的取值规则）。</summary>
         private void AddHint(string text, int x, int y)
         {
             Label l = new Label();
@@ -380,6 +406,12 @@ namespace DshLauncher
             return p;
         }
 
+        /// <summary>往指定容器里加一个单选按钮（宽高固定，位置按设计像素给）。</summary>
+        /// <param name="parent">父容器。**必须传本组自己的容器**，否则会同名成一大组互斥，见 AddRadioGroup。</param>
+        /// <param name="text">按钮文字。</param>
+        /// <param name="x">容器内 X（设计像素）。</param>
+        /// <param name="y">容器内 Y（设计像素）。</param>
+        /// <returns>新建的单选按钮。</returns>
         private RadioButton AddRadio(Control parent, string text, int x, int y)
         {
             RadioButton r = new RadioButton();
@@ -397,6 +429,12 @@ namespace DshLauncher
         }
 
         /// <summary>动效档位的单选（一行三个，比三行单选省地方）。同样必须挂在自己的容器里。</summary>
+        /// <summary>动效档位的单选（一行三个，比三行单选省地方）。同样必须挂在自己的容器里。</summary>
+        /// <param name="parent">本组专属容器。</param>
+        /// <param name="text">档位名（完整 / 精简 / 关闭）。</param>
+        /// <param name="x">容器内 X（设计像素）。</param>
+        /// <param name="w">宽度（设计像素）。</param>
+        /// <returns>新建的单选按钮；勾选变化会即时刷新下方说明文字。</returns>
         private RadioButton AddMotionRadio(Control parent, string text, int x, int w)
         {
             RadioButton r = new RadioButton();
@@ -422,6 +460,7 @@ namespace DshLauncher
             return MotionLevel.Full;
         }
 
+        /// <summary>把当前档位对应的说明文字填进 _motionHint（切换档位时即时更新）。</summary>
         private void SyncMotionHint()
         {
             if (_motionHint == null) return;
@@ -439,6 +478,11 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>加一个复选框（统一样式与行宽）。</summary>
+        /// <param name="text">选项文字。</param>
+        /// <param name="x">窗体 X（设计像素）。</param>
+        /// <param name="y">窗体 Y（设计像素）。</param>
+        /// <returns>新建的复选框。</returns>
         private CheckBox AddCheck(string text, int x, int y)
         {
             CheckBox c = new CheckBox();
@@ -455,6 +499,11 @@ namespace DshLauncher
             return c;
         }
 
+        /// <summary>把配置回填到各控件（窗口刚建好时调一次）。</summary>
+        /// <remarks>
+        /// 所有字段都做"偏保守"的解读：启动方式非 direct 一律按 npm 方式显示，版本模式非 pinned 一律按最新版显示，
+        /// 这样配置文件里出现未知值时不会出现"两个选项都没选中"的空档。
+        /// </remarks>
         private void LoadValues()
         {
             _dir.Text = _cfg.Workspace;
@@ -482,6 +531,11 @@ namespace DshLauncher
                 : _cfg.InstallDir;
         }
 
+        /// <summary>把所有控件恢复到 AppConfig 的默认值（只改界面，保存后才会写盘）。</summary>
+        /// <remarks>
+        /// 与 LoadValues 的差别不只是取值来源：这里刻意把几个"机器相关"的开关归零 ——
+        /// 工作目录、安装位置、开机自启都不属于"默认值"，重置不该顺手改掉用户的部署现状。
+        /// </remarks>
         private void ResetDefaults()
         {
             AppConfig def = new AppConfig();
@@ -504,6 +558,7 @@ namespace DshLauncher
             SyncMotionHint();
         }
 
+        /// <summary>用系统文件夹对话框挑工作目录；取消则保持原值不动。</summary>
         private void BrowseFolder()
         {
             using (FolderBrowserDialog dlg = new FolderBrowserDialog())
@@ -515,8 +570,15 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>校验输入、把控件值写回 _cfg，然后以 DialogResult.OK 关窗。</summary>
+        /// <remarks>
+        /// 这里**只改内存中的配置对象**，真正落盘由调用方（LauncherContext）在对话框返回后执行；
+        /// 安装位置的搬迁同理，本窗只把待生效值放进 PendingInstallDir。
+        /// 因此本方法可以中途 return 而不留半写状态。
+        /// </remarks>
         private void Save()
         {
+            // 去掉首尾空白与引号：用户从资源管理器「复制路径」拿到的字符串是带引号的
             string dir = _dir.Text.Trim().Trim('"');
             if (!Directory.Exists(dir))
             {
@@ -524,6 +586,7 @@ namespace DshLauncher
                     "请选择一个已存在的目录，或先创建它。");
                 return;
             }
+            // 服务在跑时改端口不会立刻生效（监听已经绑好），只提示、不阻止保存
             bool portChanged = ((int)_port.Value) != _cfg.Port;
             if (portChanged && _server != null && _server.Owned &&
                 (_server.Status == ServerStatus.Running || _server.Status == ServerStatus.Starting))
@@ -539,6 +602,7 @@ namespace DshLauncher
             _cfg.VerifyIntegrity = _verify.Checked;
             _cfg.VersionMode = _versionMode.Checked ? "latest" : "pinned";
             _cfg.PinnedVersion = _version.Text.Trim();
+            // 没选中任何项时保留原值，不写入空串，免得把可用源配置清坏
             _cfg.Registry = _registry.SelectedItem == null ? _cfg.Registry : _registry.SelectedItem.ToString();
             _cfg.AutoOpenBrowser = _autoOpen.Checked;
             _cfg.EdgeAppMode = _edge.Checked;
@@ -547,6 +611,9 @@ namespace DshLauncher
             _cfg.TransitionAnimation = _transition.Checked;
             _cfg.Motion = UiMotion.LevelKey(SelectedMotion());   // 二级界面过渡动画档位
 
+            // 与上面各字段不同，开机自启有副作用（要动启动文件夹），必须立刻落到磁盘上，
+            // 不能等调用方保存配置时再处理。
+            // 条件里的 || wantAutostart 是"勾着就重建"：快捷方式可能被清理过，重建一次才算真正生效。
             bool wantAutostart = _autostart.Checked;
             if (wantAutostart != _cfg.AutoStart || wantAutostart) ApplyAutoStart(wantAutostart);
             _cfg.AutoStart = wantAutostart;
@@ -555,6 +622,13 @@ namespace DshLauncher
             Close();
         }
 
+        /// <summary>按勾选状态建或删开机自启项，并把旧方案留下的自启快捷方式退休掉。</summary>
+        /// <param name="enable">true = 建（先退休旧的再建新的）；false = 删掉启动文件夹里那一条。</param>
+        /// <remarks>
+        /// 建失败会弹提示而不是静默失败 —— 用户以为自启开了、实际没开，是最难排查的那类问题。
+        /// 退休旧自启项是历史包袱：早期方案用的是另一条快捷方式，两条并存会导致开机启动两次。
+        /// 整个过程包在 try 里：设置窗不该因为快捷方式建不出来而打不开或关不掉。
+        /// </remarks>
         private void ApplyAutoStart(bool enable)
         {
             try
@@ -576,6 +650,7 @@ namespace DshLauncher
                 else
                 {
                     // 以配置为准：关掉就把启动文件夹里那条清掉，不留孤儿
+                    // （旧自启项也一并退休，否则下次开机会从旧路径再拉起一个实例）
                     Shortcuts.Delete(Shortcuts.AutoStartLinkPath);
                     Shortcuts.RetireLegacyAutoStart(AppPaths.ExePath);
                 }
@@ -656,6 +731,11 @@ namespace DshLauncher
                 "正在运行的 DSH 服务不受影响。");
         }
 
+        /// <summary>整窗自绘：头部色带 + 刻度尺 + 标志标题 + 四角括号 + 章节导轨。</summary>
+        /// <remarks>
+        /// 顺序即层次：纸 → 网格 → 头部色带 → 刻度尺 → 标志与标题（压在高亮条上）→ 四角括号 → 章节导轨。
+        /// 输入控件由框架画在本方法之上，这里只负责"版式"。
+        /// </remarks>
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -722,7 +802,9 @@ namespace DshLauncher
             Theme.DrawTrackedRight(g, "RHINE · LAB", Theme.FontMonoSmall,
                 right - markW - Theme.S(10), Theme.S(37), Theme.Mix(Theme.Panel, Theme.Sub, markP), Theme.SF(1.6f));
 
+            g.TranslateTransform(0, AutoScrollPosition.Y);   // 自绘内容跟随滚动（子控件会移，自绘不会 —— 框架不做这个平移）
             DrawSections(g);
+            g.TranslateTransform(0, -AutoScrollPosition.Y);
 
             // 四角括号压在最上层：它框住的是整张卡片
             if (_reveal != null && _reveal.WantsLayout)
